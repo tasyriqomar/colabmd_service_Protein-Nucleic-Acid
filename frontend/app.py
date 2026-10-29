@@ -94,24 +94,61 @@ with tab1:
     convert_rna = st.checkbox("Convert RNA (U) to DNA (T)", value=True)
     
     if st.button("Process Aptamer") and aptamer_file:
-        with st.spinner("Processing on Colab..."):
+        st.session_state.aptamer_bytes = None
+        
+        with st.spinner("Processing Aptamer PDB on Colab..."):
             files = {"aptamer_pdb": (aptamer_file.name, aptamer_file.getvalue(), "chemical/x-pdb")}
             data = {"convert_rna": convert_rna}
-            res = requests.post(f"{API_URL}/run-aptamer", files=files, data=data)
             
-            if res.status_code == 200:
-                task_id = res.json()["task_id"]
-                while True:
-                    status_res = requests.get(f"{API_URL}/status/{task_id}").json()
-                    if status_res["status"] == "SUCCESS":
-                        dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
-                        st.session_state.aptamer_bytes = dl.content
-                        st.success("✅ Aptamer processed successfully!")
-                        break
-                    time.sleep(2)
+            try:
+                res = requests.post(f"{API_URL}/run-aptamer", files=files, data=data)
+                
+                if res.status_code == 200:
+                    task_id = res.json()["task_id"]
+                    status_placeholder = st.empty()
+                    
+                    while True:
+                        status_res = requests.get(f"{API_URL}/status/{task_id}").json()
+                        status = status_res["status"]
+                        
+                        if status == "SUCCESS":
+                            task_result = status_res.get("result", {})
+                            if task_result.get("status") == "success":
+                                status_placeholder.success("✅ Aptamer processed successfully!")
+                                dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
+                                
+                                if dl.status_code == 200:
+                                    # Save bytes to persistent session state
+                                    st.session_state.aptamer_bytes = dl.content
+                                    time.sleep(1)
+                                    st.rerun()  # Refresh page to display download button
+                                else:
+                                    status_placeholder.error(f"❌ Download failed from backend with code {dl.status_code}")
+                            else:
+                                status_placeholder.error(f"❌ Script Error: {task_result.get('message')}")
+                            break
+                        elif status == "FAILED":
+                            status_placeholder.error("❌ Celery Task Failed on Colab.")
+                            break
+                        else:
+                            status_placeholder.info(f"⏳ Status: {status} (Processing Aptamer PDB...)")
+                            time.sleep(2)
+                else:
+                    st.error(f"API Error {res.status_code}: {res.text}")
+            except Exception as e:
+                st.error(f"Failed to connect to backend: {str(e)}")
 
-    if st.session_state.aptamer_bytes:
-        st.download_button("⬇️ Download aptamer_fixed.pdb", st.session_state.aptamer_bytes, file_name="aptamer_fixed.pdb", key="dl_apt_btn")
+    # --- PERSISTENT DOWNLOAD DISPLAY (Rendered outside button click) ---
+    if st.session_state.get("aptamer_bytes"):
+        st.markdown("---")
+        st.success("✅ Processed Aptamer is ready for download!")
+        st.download_button(
+            label="⬇️ Download aptamer_fixed.pdb",
+            data=st.session_state.aptamer_bytes,
+            file_name="aptamer_fixed.pdb",
+            mime="chemical/x-pdb",
+            key="dl_aptamer_fixed_btn"
+        )
 
 # ==========================================
 # TAB 2: CGMD PREPARATION
