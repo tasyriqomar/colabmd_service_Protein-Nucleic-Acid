@@ -107,27 +107,37 @@ with tab1:
                     while True:
                         s_res = requests.get(f"{API_URL}/status/{task_id}").json()
                         st_val = s_res["status"]
+                        
                         if st_val == "SUCCESS":
-                            dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
-                            if dl.status_code == 200:
-                                st.session_state.aptamer_bytes = dl.content
-                                st.success("✅ Aptamer processed successfully!")
-                                time.sleep(1)
-                                st.rerun()
+                            task_result = s_res.get("result", {})
+                            if isinstance(task_result, dict) and task_result.get("status") == "success":
+                                dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
+                                if dl.status_code == 200:
+                                    st.session_state.aptamer_bytes = dl.content
+                                    status_ph.success("✅ Aptamer processed successfully!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    status_ph.error(f"❌ Failed to download result (HTTP {dl.status_code}).")
+                            else:
+                                err_msg = task_result.get("message", "Task failed on Colab.") if isinstance(task_result, dict) else str(task_result)
+                                status_ph.error(f"❌ Script Error: {err_msg}")
                             break
                         elif st_val == "FAILED":
-                            status_ph.error("❌ Task failed on Colab.")
+                            status_ph.error("❌ Celery Task Failed on Colab.")
                             break
                         else:
                             status_ph.info(f"⏳ Status: {st_val} (Processing PDB...)")
                             time.sleep(2)
                 else:
-                    st.error(f"Error {res.status_code}: {res.text}")
+                    st.error(f"API Error {res.status_code}: {res.text}")
             except Exception as e:
                 st.error(f"Connection error: {e}")
 
+    # Rendered persistently outside of the button trigger
     if st.session_state.get("aptamer_bytes"):
         st.markdown("---")
+        st.success("✅ Processed Aptamer (`aptamer_fixed.pdb`) is ready!")
         st.download_button(
             label="⬇️ Download aptamer_fixed.pdb",
             data=st.session_state.aptamer_bytes,
