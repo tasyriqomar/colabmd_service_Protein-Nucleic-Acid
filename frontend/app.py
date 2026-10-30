@@ -91,6 +91,14 @@ with tab1:
     st.header("Step 1: Aptamer Processing")
     st.markdown("Convert RNA structures to DNA (`rna_to_dna_with_methyl.py`) and rename residues for GROMACS parameterization.")
     
+    # Guidance for generating the initial 3D structure
+    st.info("💡 **Don't have a 3D structure yet?**")
+    st.markdown("""
+    - Predict secondary structure with [RNAfold](http://rna.tbi.univie.ac.at/cgi-bin/RNAWebSuite/RNAfold.cgi)
+    - Submit sequence to [RNAComposer](https://rnacomposer.cs.put.poznan.pl/) and download `Aptamer.pdb`
+    """)
+    st.markdown("---")
+    
     aptamer_file = st.file_uploader("Upload Aptamer Structure (PDB)", type=["pdb"], key="apt_upload")
     convert_rna = st.checkbox("Convert RNA (Uracil) to DNA (Thymine)", value=True)
     
