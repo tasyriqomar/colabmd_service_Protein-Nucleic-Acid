@@ -56,6 +56,13 @@ async def api_aptamer(aptamer_pdb: UploadFile = File(...), convert_rna: bool = F
     work_dir = SHARED_DATA / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
     content = await aptamer_pdb.read()
+    
+    # Save both casing variants directly before Celery picks it up
+    with open(work_dir / "Aptamer.pdb", "wb") as f:
+        f.write(content)
+    with open(work_dir / "aptamer.pdb", "wb") as f:
+        f.write(content)
+
     task = run_aptamer_task.delay(str(work_dir), content, convert_rna)
     return {"task_id": task.id, "job_id": job_id}
 
