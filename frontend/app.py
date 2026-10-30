@@ -8,6 +8,8 @@ import pandas as pd
 import py3Dmol
 import re
 import streamlit.components.v1 as components
+import io
+from Bio.PDB import PDBParser
 
 # 1. PAGE SETUP
 st.set_page_config(page_title="ColabMD - Protein-Nucleic Acid", page_icon="🧬", layout="wide")
@@ -253,34 +255,81 @@ with tab3:
         )
         
         st.markdown("---")
-        st.subheader("Interactive 3D Viewer (Interface Highlighted)")
+        st.subheader("Interactive 3D Viewer (Labeled Interface)")
         try:
             with zipfile.ZipFile(io.BytesIO(st.session_state.docking_zip_bytes)) as z:
-                # 1. Extract Best Pose and Contact CSV
+                # Extract Best Pose
                 pdb_string = z.read("docked_complex_best.pdb").decode("utf-8")
-                contacts_csv = z.read("interfacial_contacts.csv")
                 
-                df_contacts = pd.read_csv(io.BytesIO(contacts_csv))
+            # Parse structure in memory to extract atomic coordinates for labels
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure('docked_complex', io.StringIO(pdb_string))
+            model = structure[0]
+            chain_a = model['A']
+            chain_b = model['B']
+            
+            contact_cutoff = 4.0
+            protein_interface_res = set()
+            dna_interface_res = set()
+            labeled_atoms = []
+            
+            for atom_a in chain_a.get_atoms():
+                if atom_a.element == 'H': continue
+                for atom_b in chain_b.get_atoms():
+                    if atom_b.element == 'H': continue
+                    
+                    if (atom_a - atom_b) <= contact_cutoff:
+                        res_a = atom_a.get_parent()
+                        res_b = atom_b.get_parent()
+                        
+                        protein_interface_res.add(res_a.get_id()[1])
+                        dna_interface_res.add(res_b.get_id()[1])
+                        
+                        labeled_atoms.append((atom_a, res_a, 'A'))
+                        labeled_atoms.append((atom_b, res_b, 'B'))
+                        
+            prot_res_list = list(protein_interface_res)
+            dna_res_list = list(dna_interface_res)
                 
-                # Extract integer residue numbers using Regex
-                prot_res_list = [int(re.search(r'\d+', str(x)).group()) for x in df_contacts['Protein Residue'].unique() if re.search(r'\d+', str(x))]
-                dna_res_list = [int(re.search(r'\d+', str(x)).group()) for x in df_contacts['DNA Residue'].unique() if re.search(r'\d+', str(x))]
-                
-            # 2. Configure High-Res py3Dmol Viewer
-            view = py3Dmol.view(width=800, height=500)
+            # Configure High-Res py3Dmol Viewer
+            view = py3Dmol.view(width=800, height=600)
             view.addModel(pdb_string, "pdb")
             
             # Base styles (faded cartoons)
-            view.setStyle({'chain': 'A'}, {'cartoon': {'color': 'royalblue', 'opacity': 0.6}})
-            view.setStyle({'chain': 'B'}, {'cartoon': {'color': 'darkorange', 'opacity': 0.6}})
+            view.setStyle({'chain': 'A'}, {'cartoon': {'color': 'royalblue', 'opacity': 0.3}})
+            view.setStyle({'chain': 'B'}, {'cartoon': {'color': 'darkorange', 'opacity': 0.3}})
             
             # Highlight Interface Residues with thick sticks
             view.addStyle({'chain': 'A', 'resi': prot_res_list}, {'stick': {'color': 'cyan', 'radius': 0.2}, 'cartoon': {'color': 'royalblue', 'opacity': 1.0}})
             view.addStyle({'chain': 'B', 'resi': dna_res_list}, {'stick': {'color': 'yellow', 'radius': 0.2}, 'cartoon': {'color': 'darkorange', 'opacity': 1.0}})
             
+            # Add text labels to interacting atoms
+            seen_atoms = set()
+            for atom, res, chain_id in labeled_atoms:
+                atom_key = (chain_id, res.get_id()[1], atom.get_name())
+                if atom_key in seen_atoms:
+                    continue
+                seen_atoms.add(atom_key)
+                
+                label_text = f"{res.get_resname().strip()}{res.get_id()[1]}:{atom.get_name().strip()}"
+                pos = atom.get_coord()
+                bg_color = '#1e3d59' if chain_id == 'A' else '#d96459'
+                
+                view.addLabel(
+                    label_text,
+                    {
+                        'position': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
+                        'backgroundColor': bg_color,
+                        'fontColor': 'white',
+                        'fontSize': 12,
+                        'borderThickness': 0.5,
+                        'backgroundOpacity': 0.8
+                    }
+                )
+            
             view.zoomTo({'chain': 'A', 'resi': prot_res_list})
             
-            # 3. Inject JS Download Button for Publication Quality Export
+            # Inject JS Download Button for Publication Quality Export
             viewer_html = view._make_html()
             download_btn_html = """
             <div style="text-align: center; margin-top: 5px;">
@@ -295,7 +344,7 @@ with tab3:
                     var canvas = canvases[canvases.length - 1];
                     var imageURI = canvas.toDataURL("image/png").replace("image/png", "image/octet-stream");
                     var link = document.createElement('a');
-                    link.download = 'docked_interface_publication.png';
+                    link.download = 'docked_interface_labeled_publication.png';
                     link.href = imageURI;
                     document.body.appendChild(link);
                     link.click();
@@ -307,8 +356,7 @@ with tab3:
             </script>
             """
             
-            # Combine the viewer HTML and the button script, then render
-            components.html(viewer_html + download_btn_html, height=560)
+            components.html(viewer_html + download_btn_html, height=660)
             
         except Exception as e:
             st.warning(f"Could not render 3D viewer: {e}")
