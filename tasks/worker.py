@@ -25,13 +25,12 @@ def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: boo
     wd = Path(work_dir)
     wd.mkdir(parents=True, exist_ok=True)
     try:
-        # Save under both 'Aptamer.pdb' and 'aptamer.pdb' to satisfy case sensitivity
+        # Guarantee both filenames exist in the task working directory
         with open(wd / "Aptamer.pdb", "wb") as f:
             f.write(aptamer_pdb_content)
         with open(wd / "aptamer.pdb", "wb") as f:
             f.write(aptamer_pdb_content)
 
-        # Copy scripts from /app/tools/Aptamer-Processing
         shutil.copy("/app/tools/Aptamer-Processing/rna_to_dna_with_methyl.py", wd / "rna_to_dna_with_methyl.py")
         shutil.copy("/app/tools/Aptamer-Processing/rename_dna.py", wd / "rename_dna.py")
 
@@ -39,7 +38,7 @@ def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: boo
             # Converts Aptamer.pdb -> aptamer_DNA.pdb
             subprocess.run([sys.executable, "rna_to_dna_with_methyl.py"], cwd=str(wd), check=True, capture_output=True, text=True)
         else:
-            # If already DNA, duplicate to aptamer_DNA.pdb so rename_dna.py can find it
+            # If already DNA, create aptamer_DNA.pdb for rename_dna.py
             shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
 
         # Converts aptamer_DNA.pdb -> aptamer_fixed.pdb
@@ -56,7 +55,6 @@ def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: boo
     except Exception as e:
         return {"status": "failed", "message": str(e)}
 
-# Alias in case another router references the older name
 run_aptamer_processing_task = run_aptamer_task
 
 # ==============================================================================
