@@ -24,6 +24,9 @@ celery_app = Celery(
 def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: bool):
     wd = Path(work_dir)
     try:
+        # Write both casing variants so rna_to_dna_with_methyl.py finds "Aptamer.pdb"
+        with open(wd / "Aptamer.pdb", "wb") as f:
+            f.write(aptamer_pdb_content)
         with open(wd / "aptamer.pdb", "wb") as f:
             f.write(aptamer_pdb_content)
 
@@ -31,8 +34,13 @@ def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: boo
         shutil.copy("/app/tools/Aptamer-Processing/rename_dna.py", wd / "rename_dna.py")
 
         if convert_rna:
+            # Converts Aptamer.pdb -> aptamer_DNA.pdb
             subprocess.run([sys.executable, "rna_to_dna_with_methyl.py"], cwd=wd, check=True, capture_output=True, text=True)
+        else:
+            # If already DNA, duplicate to aptamer_DNA.pdb for rename_dna.py
+            shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
 
+        # Converts aptamer_DNA.pdb -> aptamer_fixed.pdb
         subprocess.run([sys.executable, "rename_dna.py"], cwd=wd, check=True, capture_output=True, text=True)
 
         fixed_pdb = wd / "aptamer_fixed.pdb"
