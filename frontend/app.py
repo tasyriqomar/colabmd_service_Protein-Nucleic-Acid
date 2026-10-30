@@ -5,6 +5,9 @@ import zipfile
 import io
 import os
 import pandas as pd
+import py3Dmol
+import re
+import streamlit.components.v1 as components
 
 # 1. PAGE SETUP
 st.set_page_config(page_title="ColabMD - Protein-Nucleic Acid", page_icon="🧬", layout="wide")
@@ -210,15 +213,20 @@ with tab3:
                         st_val = s_res["status"]
                         if st_val == "SUCCESS":
                             t_res = s_res.get("result", {})
-                            if t_res.get("status") == "success":
+                            if isinstance(t_res, dict) and t_res.get("status") == "success":
                                 dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
                                 if dl.status_code == 200:
                                     st.session_state.docking_zip_bytes = dl.content
                                     if "scores" in t_res:
                                         st.session_state.docking_scores_df = pd.DataFrame(t_res["scores"])
-                                    st.success("✅ Docking and interaction contact mapping complete!")
+                                    status_ph.success("✅ Docking and interaction contact mapping complete!")
                                     time.sleep(1)
                                     st.rerun()
+                                else:
+                                    status_ph.error(f"❌ Download failed (HTTP {dl.status_code}).")
+                            else:
+                                err_msg = t_res.get("message", "Task failed on Colab.") if isinstance(t_res, dict) else str(t_res)
+                                status_ph.error(f"❌ Script Error: {err_msg}")
                             break
                         elif st_val == "FAILED":
                             status_ph.error("❌ Docking failed on Colab.")
@@ -226,6 +234,8 @@ with tab3:
                         else:
                             status_ph.info(f"⏳ Status: {st_val} (Running HADDOCK3 engine...)")
                             time.sleep(3)
+                else:
+                    st.error(f"Error {res.status_code}: {res.text}")
             except Exception as e:
                 st.error(f"Connection error: {e}")
 
@@ -241,6 +251,67 @@ with tab3:
             mime="application/zip",
             key="dl_dock_btn"
         )
+        
+        st.markdown("---")
+        st.subheader("Interactive 3D Viewer (Interface Highlighted)")
+        try:
+            with zipfile.ZipFile(io.BytesIO(st.session_state.docking_zip_bytes)) as z:
+                # 1. Extract Best Pose and Contact CSV
+                pdb_string = z.read("docked_complex_best.pdb").decode("utf-8")
+                contacts_csv = z.read("interfacial_contacts.csv")
+                
+                df_contacts = pd.read_csv(io.BytesIO(contacts_csv))
+                
+                # Extract integer residue numbers using Regex
+                prot_res_list = [int(re.search(r'\d+', str(x)).group()) for x in df_contacts['Protein Residue'].unique() if re.search(r'\d+', str(x))]
+                dna_res_list = [int(re.search(r'\d+', str(x)).group()) for x in df_contacts['DNA Residue'].unique() if re.search(r'\d+', str(x))]
+                
+            # 2. Configure High-Res py3Dmol Viewer
+            view = py3Dmol.view(width=800, height=500)
+            view.addModel(pdb_string, "pdb")
+            
+            # Base styles (faded cartoons)
+            view.setStyle({'chain': 'A'}, {'cartoon': {'color': 'royalblue', 'opacity': 0.6}})
+            view.setStyle({'chain': 'B'}, {'cartoon': {'color': 'darkorange', 'opacity': 0.6}})
+            
+            # Highlight Interface Residues with thick sticks
+            view.addStyle({'chain': 'A', 'resi': prot_res_list}, {'stick': {'color': 'cyan', 'radius': 0.2}, 'cartoon': {'color': 'royalblue', 'opacity': 1.0}})
+            view.addStyle({'chain': 'B', 'resi': dna_res_list}, {'stick': {'color': 'yellow', 'radius': 0.2}, 'cartoon': {'color': 'darkorange', 'opacity': 1.0}})
+            
+            view.zoomTo({'chain': 'A', 'resi': prot_res_list})
+            
+            # 3. Inject JS Download Button for Publication Quality Export
+            viewer_html = view._make_html()
+            download_btn_html = """
+            <div style="text-align: center; margin-top: 5px;">
+                <button id="download_btn" style="background-color: #2e7d32; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
+                    📸 Download High-Res PNG
+                </button>
+            </div>
+            <script>
+            document.getElementById('download_btn').onclick = function() {
+                var canvases = document.getElementsByTagName('canvas');
+                if (canvases.length > 0) {
+                    var canvas = canvases[canvases.length - 1];
+                    var imageURI = canvas.toDataURL("image/png").replace("image/png", "image/octet-stream");
+                    var link = document.createElement('a');
+                    link.download = 'docked_interface_publication.png';
+                    link.href = imageURI;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                } else {
+                    alert("Canvas not found. Please wait for the 3D model to finish rendering.");
+                }
+            };
+            </script>
+            """
+            
+            # Combine the viewer HTML and the button script, then render
+            components.html(viewer_html + download_btn_html, height=560)
+            
+        except Exception as e:
+            st.warning(f"Could not render 3D viewer: {e}")
 
 # ------------------------------------------
 # TAB 4: COARSE-GRAINED MD (CGMD)
