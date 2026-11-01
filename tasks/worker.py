@@ -406,64 +406,478 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         return {"status": "failed", "message": str(e)}
 
 # ==============================================================================
-# TAB 6: BACKMAPPING
+# TAB 6: BACKMAPPING WORKFLOW (PROTEIN - NUCLEIC ACID)
 # ==============================================================================
+
+INITRAM_SCRIPT = r"""#!/bin/bash
+
+PROGRAM=initram.sh
+VERSION=0.7-purepython
+AUTHOR="Tsjerk A. Wassenaar, PhD (Updated for GMX 2019+)"
+
+DEPENDENCIES=(backward.py gmx python3)
+SDIR=$( [[ $0 != ${0%/*} ]] && cd ${0%/*}; pwd )
+
+INP=
+TOP=
+OUT=backmapped.gro
+OTP=backmapped.top
+NDX=backmapped.ndx
+RAW=projected.gro
+BW=0-backward.gro
+CG=martini
+AA=charmm36
+NP=0
+KICK=0.5
+KEEP=false
+TRJ=false
+POSRE=true
+
+# Read steps from environment variables (Python memory feature)
+EMSTEPS=${EM_STEPS:-3000}
+NBSTEPS=${NB_STEPS:-1000}
+MDSTEPS=${MD_STEPS:-500}
+DT=0.0002,0.0005,0.001,0.002
+MDP=()
+
+while [ -n "$1" ]; do
+  case $1 in
+        -f)    INP=$2   ; shift 2; continue ;;
+        -p)    TOP=$2   ; shift 2; continue ;;
+       -po)    OTP=$2   ; shift 2; continue ;;
+        -o)    OUT=$2   ; shift 2; continue ;;
+     -from)    CG=$2    ; shift 2; continue ;;
+       -to)    AA=$2    ; shift 2; continue ;;
+     -kick)    KICK=$2  ; shift 2; continue ;;
+     -keep)    KEEP=true; shift  ; continue ;;
+      -nopr)   POSRE=false; shift; continue ;;
+          *)   shift ;;
+  esac
+done
+
+[[ -z $INP ]] && echo "FATAL ERROR: MISSING INPUT STRUCTURE FILE" && exit 1
+[[ -z $TOP ]] && echo "FATAL ERROR: MISSING INPUT TOPOLOGY FILE" && exit 1
+
+$POSRE && MDPDEF=-DPOSRES || MDPDEF=
+GARBAGE=()
+trash() { for item in $@; do GARBAGE[${#GARBAGE[@]}]=$item; done; }
+
+echo "=========================================================="
+echo " Running Initram v0.7 with Pure-Python Spatial De-Clasher"
+echo "=========================================================="
+
+GRO=$BW
+B="$SDIR/backward.py -f $INP -raw $RAW -o $GRO -kick $KICK -sol -p $TOP -po $OTP -n $NDX -from $CG -to $AA"
+echo $B; $B || exit 1
+trash $RAW $GRO
+
+# --- ZERO-DEPENDENCY PURE PYTHON SPATIAL DE-CLASHER ---
+python3 - << 'EOF'
+import math
+import random
+
+gro_file = '0-backward.gro'
+with open(gro_file, 'r') as f:
+    lines = f.readlines()
+
+header = lines[:2]
+atom_lines = lines[2:-1]
+box_line = lines[-1]
+
+coords = []
+for line in atom_lines:
+    x = float(line[20:28])
+    y = float(line[28:36])
+    z = float(line[36:44])
+    coords.append([x, y, z])
+
+min_dist = 0.105
+min_dist_sq = min_dist * min_dist
+
+for iteration in range(120):
+    grid = {}
+    clashes_found = 0
+    for idx, (x, y, z) in enumerate(coords):
+        cell = (int(x / min_dist), int(y / min_dist), int(z / min_dist))
+        if cell not in grid:
+            grid[cell] = []
+        grid[cell].append(idx)
+
+    for cell, indices in grid.items():
+        cx, cy, cz = cell
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    neighbor = (cx + dx, cy + dy, cz + dz)
+                    if neighbor in grid:
+                        for i in indices:
+                            for j in grid[neighbor]:
+                                if i < j:
+                                    x1, y1, z1 = coords[i]
+                                    x2, y2, z2 = coords[j]
+                                    rx, ry, rz = x2 - x1, y2 - y1, z2 - z1
+                                    d2 = rx*rx + ry*ry + rz*rz
+                                    if d2 < min_dist_sq:
+                                        clashes_found += 1
+                                        dist = math.sqrt(d2)
+                                        if dist < 1e-5:
+                                            rx = random.uniform(-1, 1)
+                                            ry = random.uniform(-1, 1)
+                                            rz = random.uniform(-1, 1)
+                                            dist = math.sqrt(rx*rx + ry*ry + rz*rz)
+                                        ux, uy, uz = rx/dist, ry/dist, rz/dist
+                                        overlap = (min_dist - dist) / 2.0
+                                        coords[i][0] -= ux * overlap
+                                        coords[i][1] -= uy * overlap
+                                        coords[i][2] -= uz * overlap
+                                        coords[j][0] += ux * overlap
+                                        coords[j][1] += uy * overlap
+                                        coords[j][2] += uz * overlap
+
+    if clashes_found == 0:
+        print(f"-> All spatial clashes resolved in {iteration} iterations!")
+        break
+
+new_atom_lines = []
+for idx, line in enumerate(atom_lines):
+    x, y, z = coords[idx]
+    new_line = line[:20] + f"{x:8.3f}{y:8.3f}{z:8.3f}" + line[44:]
+    new_atom_lines.append(new_line)
+
+with open(gro_file, 'w') as f:
+    f.writelines(header + new_atom_lines + [box_line])
+EOF
+
+i=1
+
+###############################################
+## STEP 2: ENERGY MINIMIZATION PASS 1        ##
+###############################################
+if [ "$EMSTEPS" -gt 0 ]; then
+    BASE=$i-EM
+    mdp=$BASE.mdp
+
+cat << __MDP__ > $mdp
+define                    = -DFLEXIBLE
+integrator                = steep
+nsteps                    = $EMSTEPS
+emstep                    = 0.001
+emtol                     = 100.0
+pbc                       = xyz
+cutoff-scheme             = Verlet
+nstlist                   = 10
+rlist                     = 1.0
+rcoulomb                  = 1.0
+rvdw                      = 1.0
+coulombtype               = Cut-off
+vdwtype                   = Cut-off
+constraints               = none
+nstxout-compressed        = 0
+__MDP__
+
+    G="gmx grompp -f $mdp -c $GRO -n $NDX -p $OTP -o $BASE -maxwarn 2"
+    echo $G; $G || exit 1
+    M="gmx mdrun -deffnm $BASE -v -nt $NP"
+    echo $M; $M || { echo "FATAL: EM1 failed."; exit 1; }
+
+    trash $BASE.*
+    GRO=$((i++))-EM.gro
+fi
+
+############################################
+## STEP 3: ENERGY MINIMIZATION PASS 2     ##
+############################################
+if [ "$NBSTEPS" -gt 0 ]; then
+    BASE=$i-EM
+cat << __MDP__ > $BASE.mdp
+define                    = -DFLEXIBLE
+integrator                = steep
+nsteps                    = $NBSTEPS
+emstep                    = 0.005
+emtol                     = 10.0
+pbc                       = xyz
+cutoff-scheme             = Verlet
+nstlist                   = 10
+rlist                     = 1.0
+rcoulomb                  = 1.0
+rvdw                      = 1.0
+coulombtype               = Cut-off
+vdwtype                   = Cut-off
+constraints               = none
+nstxout-compressed        = 0
+__MDP__
+    mdp=$BASE.mdp
+
+    G="gmx grompp -f $mdp -c $GRO -n $NDX -p $OTP -o $BASE -maxwarn 2"
+    echo $G; $G || exit 1
+    M="gmx mdrun -deffnm $BASE -v -nt $NP"
+    echo $M; $M || { echo "FATAL: EM2 failed."; exit 1; }
+
+    trash $BASE.*
+    GRO=$i-EM.gro
+fi
+
+##########################################
+## STEP 4: MD EQUILIBRATION CYCLES      ##
+##########################################
+if [ "$MDSTEPS" -gt 0 ]; then
+    ifs=$IFS
+    IFS=,
+    DT=($DT)
+    IFS=$ifs
+
+    for DELTA_T in ${DT[@]}; do
+        BASE=$((++i))-mdpr-$DELTA_T
+        mdp=$BASE.mdp
+
+cat << __MDP__ > $mdp
+define                    = $MDPDEF
+integrator                = md
+nsteps                    = $MDSTEPS
+dt                        = $DELTA_T
+pbc                       = xyz
+cutoff-scheme             = Verlet
+nstlist                   = 20
+rcoulomb                  = 1.0
+rlist                     = 1.0
+rvdw                      = 1.0
+tcoupl                    = v-rescale
+ref_t                     = 300
+tau_t                     = 0.1
+tc_grps                   = System
+gen_vel                   = yes
+gen_temp                  = 300
+constraints               = h-bonds
+nstxout-compressed        = 0
+__MDP__
+
+      G="gmx grompp -f $mdp -c $GRO -r $BW -p $OTP -o $BASE -maxwarn 2"
+      echo $G; $G || exit 1
+      M="gmx mdrun -deffnm $BASE -v -nt $NP"
+      echo $M; $M || { echo "FATAL: Step $BASE (MD) failed."; exit 1; }
+      trash $BASE.*
+      GRO=$BASE.gro
+    done
+fi
+
+cp $GRO $OUT
+rm -f ${GARBAGE[@]}
+echo "Backmapping successfully completed!"
+"""
+
 @celery_app.task
-def run_backmapping_task(work_dir: str, xtc: bytes, tpr: bytes, mdp: bytes, ndx: bytes, fixed_pdb: bytes, apt_pdb: bytes):
+def run_backmapping_workflow(
+    work_dir: str, protein_pdb: str, aptamer_pdb: str, xtc_file: str,
+    tpr_file: str, mdp_file: str, ndx_file: str, system_gro: str,
+    aptamer_map: str = None, topol_top: str = None,
+    loop_from: int = 0, loop_until: int = 10, solute_group: int = 1
+):
     wd = Path(work_dir)
     try:
-        bm_dir = wd / "Backmapping"
-        shutil.copytree("/app/tools/Backmapping", bm_dir, dirs_exist_ok=True)
+        # 1. Prepare environment tools and mapping library
+        shutil.copy("/app/tools/Backmapping/backward.py", wd / "backward.py")
+        shutil.copytree("/app/tools/Backmapping/Mapping", wd / "Mapping", dirs_exist_ok=True)
 
-        with open(bm_dir / "dynamic_fitted.xtc", "wb") as f: f.write(xtc)
-        with open(bm_dir / "dynamic.tpr", "wb") as f: f.write(tpr)
-        with open(bm_dir / "dynamic.mdp", "wb") as f: f.write(mdp)
-        with open(bm_dir / "index.ndx", "wb") as f: f.write(ndx)
-        with open(bm_dir / "fixed.pdb", "wb") as f: f.write(fixed_pdb)
-        with open(bm_dir / "aptamer_relaxed.pdb", "wb") as f: f.write(apt_pdb)
+        if aptamer_map and (wd / aptamer_map).exists():
+            shutil.copy2(wd / aptamer_map, wd / "Mapping" / "aptamer.map")
 
-        subprocess.run('cat fixed.pdb aptamer_relaxed.pdb | grep -v -E "TITLE|MODEL|ENDMDL|CRYST1|REMARK|END" > combined.pdb', shell=True, cwd=bm_dir, check=True)
-        subprocess.run('echo "END" >> combined.pdb', shell=True, cwd=bm_dir, check=True)
-        subprocess.run(["gmx", "pdb2gmx", "-f", "combined.pdb", "-o", "aa.gro", "-ignh"], input="1\n", cwd=bm_dir, check=True, text=True, capture_output=True)
+        # 2. Write executable initram-v5.sh
+        initram_path = wd / "initram-v5.sh"
+        with open(initram_path, "w") as f:
+            f.write(INITRAM_SCRIPT)
+        subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        subprocess.run(["chmod", "+x", "Dr_Tasyriq_V4_M2.sh", "Dr_Tasyriq_V4_M2_Redo.sh", "initram-v5.sh", "backward.py"], cwd=bm_dir, check=True)
-        subprocess.run(["bash", "Dr_Tasyriq_V4_M2.sh"], cwd=bm_dir, check=True, capture_output=True, text=True)
+        # 3. Generate All-Atom topol.top and aa.gro if topol.top is not supplied
+        topol_path = wd / "topol.top"
+        if not topol_path.exists():
+            subprocess.run(
+                f'cat {protein_pdb} {aptamer_pdb} | grep -v -E "TITLE|MODEL|ENDMDL|CRYST1|REMARK|END" > combined.pdb',
+                shell=True, cwd=wd, check=True
+            )
+            subprocess.run('echo "END" >> combined.pdb', shell=True, cwd=wd, check=True)
+            subprocess.run(
+                ["gmx", "pdb2gmx", "-f", "combined.pdb", "-o", "aa.gro", "-ignh"],
+                cwd=wd, input="1\n", capture_output=True, text=True, check=True
+            )
 
-        xtc_dir = bm_dir / "all_xtc"
-        subprocess.run(["gmx", "trjcat", "-f", "*.xtc", "-o", "all.xtc"], shell=True, cwd=xtc_dir, check=True)
+        # 4. Prepare trajectory and coordinate output directories
+        out_xtc_dir = wd / "all_xtc"
+        out_gro_dir = wd / "gro"
+        out_xtc_dir.mkdir(exist_ok=True)
+        out_gro_dir.mkdir(exist_ok=True)
 
-        if (bm_dir / "gro" / "aa_0ns.gro").exists():
-            shutil.copy(bm_dir / "gro" / "aa_0ns.gro", bm_dir / "aa_0ns.gro")
+        # 5. Execute Backmapping loop natively in Python
+        for i in range(loop_from, loop_until + 1):
+            dump_time = f"{i}000"
+            trj_gro = f"trj_{i}ns.gro"
+            aa_gro = f"aa_{i}ns.gro"
+            aa_xtc = f"aa_{i}ns.xtc"
 
-        # Sanitize dynamic.mdp before grompp
-        mdp_path = bm_dir / "dynamic.mdp"
+            # Extract CG frame from dynamic_fitted.xtc using system.gro
+            subprocess.run([
+                "gmx", "trjconv", "-f", xtc_file, "-s", system_gro, "-n", ndx_file,
+                "-o", trj_gro, "-dump", dump_time
+            ], cwd=wd, input=f"{solute_group}\n", capture_output=True, text=True, check=True)
+
+            # Expedite subsequent frames using memory-driven environment parameters
+            env = os.environ.copy()
+            if i == loop_from:
+                env["EM_STEPS"] = "3000"
+                env["NB_STEPS"] = "1000"
+                env["MD_STEPS"] = "500"
+            else:
+                env["EM_STEPS"] = "2000"
+                env["NB_STEPS"] = "0"
+                env["MD_STEPS"] = "0"
+
+            # 1st Pass: Run Backmapping via initram-v5
+            subprocess.run([
+                "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
+                "-to", "charmm36", "-p", "topol.top"
+            ], cwd=wd, env=env, capture_output=True, text=True, check=True)
+
+            # Structural screening for collapsed atoms (< 0.08 nm distance)
+            if i != loop_from and (wd / aa_gro).exists():
+                collapsed = False
+                coords = []
+                with open(wd / aa_gro, "r") as f:
+                    for line in f.readlines()[2:-1]:
+                        try:
+                            x, y, z = float(line[20:28]), float(line[28:36]), float(line[36:44])
+                            coords.append((x, y, z))
+                        except ValueError:
+                            pass
+
+                for c1 in range(0, len(coords), 3):
+                    for c2 in range(c1 + 1, min(c1 + 35, len(coords))):
+                        dx = coords[c1][0] - coords[c2][0]
+                        dy = coords[c1][1] - coords[c2][1]
+                        dz = coords[c1][2] - coords[c2][2]
+                        if (dx*dx + dy*dy + dz*dz) < 0.0064:
+                            collapsed = True
+                            break
+                    if collapsed:
+                        break
+
+                if collapsed:
+                    # Fallback: Rerun this specific frame with full simulated annealing
+                    env["EM_STEPS"] = "3000"
+                    env["NB_STEPS"] = "1000"
+                    env["MD_STEPS"] = "500"
+                    subprocess.run([
+                        "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
+                        "-to", "charmm36", "-p", "topol.top"
+                    ], cwd=wd, env=env, capture_output=True, text=True, check=True)
+
+            # Update Frame Header
+            with open(wd / trj_gro, "r") as f:
+                header_line = f.readline().strip()
+            with open(wd / aa_gro, "r") as f:
+                aa_lines = f.readlines()
+            aa_lines[0] = f"Protein-Nucleic Acid Backmapped {i}ns {header_line}\n"
+            with open(wd / aa_gro, "w") as f:
+                f.writelines(aa_lines)
+
+            # Convert Frame GRO to XTC
+            subprocess.run([
+                "gmx", "trjconv", "-f", aa_gro, "-o", aa_xtc
+            ], cwd=wd, capture_output=True, text=True, check=True)
+
+            # Store in output directories
+            shutil.copy(wd / aa_xtc, out_xtc_dir / aa_xtc)
+            shutil.copy(wd / aa_gro, out_gro_dir / aa_gro)
+
+        # 6. Concatenate XTC trajectories
+        xtc_files = sorted([f.name for f in out_xtc_dir.glob("*.xtc")])
+        if not xtc_files:
+            return {"status": "failed", "message": "No all-atom XTC frames were generated."}
+
+        trjcat_cmd = ["gmx", "trjcat", "-f"] + xtc_files + ["-o", "combine.xtc"]
+        subprocess.run(trjcat_cmd, cwd=out_xtc_dir, capture_output=True, text=True, check=True)
+
+        # 7. Copy earliest GRO frame and assemble all-atomic dynamic.tpr
+        earliest_gro = f"aa_{loop_from}ns.gro"
+        source_gro = out_gro_dir / earliest_gro
+        target_gro = wd / earliest_gro
+        if source_gro.exists():
+            shutil.copy2(source_gro, target_gro)
+        else:
+            first_gro = sorted(list(out_gro_dir.glob("*.gro")))[0]
+            shutil.copy2(first_gro, target_gro)
+            earliest_gro = first_gro.name
+
+        # Sanitize dynamic.mdp
+        mdp_path = wd / mdp_file
         if mdp_path.exists():
-            with open(mdp_path, "r") as f: lines = f.readlines()
+            with open(mdp_path, "r") as f:
+                lines = f.readlines()
             new_lines = []
             for l in lines:
                 if l.strip().startswith("tc-grps"): new_lines.append("tc-grps = System\n")
                 elif l.strip().startswith("tau-t"): new_lines.append("tau-t = 0.1\n")
                 elif l.strip().startswith("ref-t"): new_lines.append("ref-t = 300\n")
                 else: new_lines.append(l)
-            with open(mdp_path, "w") as f: f.writelines(new_lines)
+            with open(mdp_path, "w") as f:
+                f.writelines(new_lines)
 
-        subprocess.run(["gmx", "grompp", "-f", "dynamic.mdp", "-c", "aa_0ns.gro", "-p", "topol.top", "-o", "dynamic.tpr", "-maxwarn", "5"], cwd=bm_dir, check=True, capture_output=True)
-        shutil.copy(bm_dir / "dynamic.tpr", xtc_dir / "dynamic.tpr")
+        grompp_cmd = [
+            "gmx", "grompp",
+            "-f", mdp_file,
+            "-c", earliest_gro,
+            "-p", "topol.top",
+            "-o", "dynamic.tpr",
+            "-maxwarn", "5"
+        ]
+        subprocess.run(grompp_cmd, cwd=wd, capture_output=True, text=True, check=True)
+        shutil.copy2(wd / "dynamic.tpr", out_xtc_dir / "dynamic.tpr")
 
-        subprocess.run(["gmx", "make_ndx", "-f", "dynamic.tpr", "-o", "index.ndx"], input="q\n", cwd=xtc_dir, check=True, text=True, capture_output=True)
-        subprocess.run(["gmx", "trjconv", "-s", "dynamic.tpr", "-n", "index.ndx", "-f", "all.xtc", "-dt", "1000", "-o", "concatenated.pdb"], input="0\n", cwd=xtc_dir, check=True, text=True, capture_output=True)
+        # 8. Fix Periodic Boundary Condition (PBC) artifacts
+        if (out_xtc_dir / "combine.xtc").exists() and (out_xtc_dir / "dynamic.tpr").exists():
+            trjconv_pbc_cmd = [
+                "gmx", "trjconv",
+                "-s", "dynamic.tpr",
+                "-f", "combine.xtc",
+                "-o", "all.xtc",
+                "-pbc", "mol",
+                "-center"
+            ]
+            subprocess.run(trjconv_pbc_cmd, cwd=out_xtc_dir, input="1\n0\n", capture_output=True, text=True, check=True)
+            (out_xtc_dir / "combine.xtc").unlink()
 
-        zip_path = wd / "backmap_results.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
-            for fname in ["all.xtc", "dynamic.tpr", "index.ndx", "concatenated.pdb"]:
-                if (xtc_dir / fname).exists(): z.write(xtc_dir / fname, arcname=fname)
+        # 9. Generate index file (all-atomic) and multiframe PDB
+        subprocess.run(["gmx", "make_ndx", "-f", "dynamic.tpr", "-o", "index.ndx"], cwd=out_xtc_dir, input="q\n", capture_output=True, text=True, check=True)
+        subprocess.run(["gmx", "trjconv", "-s", "dynamic.tpr", "-n", "index.ndx", "-f", "all.xtc", "-dt", "1000", "-o", "concatenated.pdb"], cwd=out_xtc_dir, input="0\n", capture_output=True, text=True, check=True)
 
-        return {"status": "success", "result_file": str(zip_path)}
+        # 10. Clean up root directory frame artifacts
+        for f in wd.glob("aa_*ns.gro"): f.unlink()
+        for f in wd.glob("aa_*ns.xtc"): f.unlink()
+        for f in wd.glob("trj_*ns.gro"): f.unlink()
+
+        # 11. Package final output archive
+        zip_path = wd / "backmapped_results.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(out_xtc_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    zipf.write(file_path, arcname=f"all_xtc/{file}")
+            for root, dirs, files in os.walk(out_gro_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    zipf.write(file_path, arcname=f"gro/{file}")
+
+        return {
+            "status": "success",
+            "message": "Backmapping completed successfully.",
+            "result_file": str(zip_path)
+        }
     except subprocess.CalledProcessError as e:
         err = e.stderr if e.stderr else e.stdout
-        return {"status": "failed", "message": f"Backmapping Error: {err}"}
+        return {"status": "failed", "message": f"Command Failed: {err}"}
     except Exception as e:
         return {"status": "failed", "message": str(e)}
+
+# Keep alias for backward compatibility
+run_backmapping_task = run_backmapping_workflow
 
 # ==============================================================================
 # TAB 7: TRAJECTORY ANALYSIS (RMSD, RMSF, Rg)
