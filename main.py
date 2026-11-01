@@ -10,6 +10,7 @@ from tasks.worker import (
     celery_app,
     run_aptamer_task,
     run_haddock_docking_task,
+    run_complex_cg_prep_task,
     run_backmapping_task,
     run_trajectory_analysis_task,
     run_plip_analysis_task,
@@ -74,6 +75,19 @@ async def api_docking(protein_pdb: UploadFile = File(...), dna_pdb: UploadFile =
     p_bytes = await protein_pdb.read()
     d_bytes = await dna_pdb.read()
     task = run_haddock_docking_task.delay(str(work_dir), p_bytes, d_bytes, sampling, cmrest)
+    return {"task_id": task.id, "job_id": job_id}
+
+@app.post("/api/v1/run-complex-cg-prep")
+async def api_complex_cg_prep(
+    complex_pdb: UploadFile = File(...),
+    dnatype: str = Form("ss"),
+    elastic: bool = Form(True)
+):
+    job_id = f"cgprep_{uuid.uuid4().hex[:10]}"
+    work_dir = SHARED_DATA / job_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    content = await complex_pdb.read()
+    task = run_complex_cg_prep_task.delay(str(work_dir), content, dnatype, elastic)
     return {"task_id": task.id, "job_id": job_id}
 
 @app.post("/api/v1/run-backmapping")
