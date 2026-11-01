@@ -178,7 +178,9 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         with open(complex_pdb, "wb") as f:
             f.write(complex_pdb_content)
 
-        # 1. Split docked_complex_best.pdb into Chain A (Protein) and Chain B (DNA/RNA)
+        # ----------------------------------------------------------------------
+        # 1. Split docked_complex_best.pdb into Chain A (Protein) and Chain B (DNA)
+        # ----------------------------------------------------------------------
         prot_aa_pdb = wd / "protein_aa.pdb"
         dna_aa_pdb = wd / "dna_aa.pdb"
 
@@ -194,7 +196,6 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
                         dna_lines.append(line)
 
         if not prot_lines or not dna_lines:
-            # Fallback based on residue names if chain identifiers were omitted
             dna_resnames = {"DA", "DT", "DG", "DC", "A", "T", "G", "C", "U"}
             prot_lines, dna_lines = [], []
             with open(complex_pdb, "r") as f:
@@ -214,7 +215,9 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             f.writelines(dna_lines)
             f.write("END\n")
 
+        # ----------------------------------------------------------------------
         # 2. Coarse-Grain DNA Aptamer using martinize-dna.py
+        # ----------------------------------------------------------------------
         subprocess.run(["gmx", "editconf", "-f", "dna_aa.pdb", "-o", "dna_aa.gro"], cwd=str(wd), check=True, capture_output=True)
         dna_cmd = [
             "python2", str(cg_tools_dir / "martinize-dna.py"),
@@ -226,11 +229,13 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         subprocess.run(dna_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
         subprocess.run(["gmx", "editconf", "-f", "dna_CG.pdb", "-o", "aptamer_CG.gro"], cwd=str(wd), check=True, capture_output=True)
 
+        # ----------------------------------------------------------------------
         # 3. Coarse-Grain Protein using martinize.py
+        # ----------------------------------------------------------------------
         prot_cmd = [
             "python2", str(cg_tools_dir / "martinize.py"),
             "-f", "protein_aa.pdb",
-            "-o", "system.top",
+            "-o", "system_prot_temp.top",
             "-x", "protein_CG.pdb",
             "-p", "backbone",
             "-ff", "martini22"
@@ -240,7 +245,9 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         subprocess.run(prot_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
         subprocess.run(["gmx", "editconf", "-f", "protein_CG.pdb", "-o", "protein_CG.gro"], cwd=str(wd), check=True, capture_output=True)
 
-        # 4. Generate Merged complex_CG.gro Preserving Docked Coordinates
+        # ----------------------------------------------------------------------
+        # 4. Generate Merged complex_CG.gro (Preserving Docked Interface)
+        # ----------------------------------------------------------------------
         with open(wd / "protein_CG.gro", "r") as f:
             p_gro_lines = f.readlines()
         with open(wd / "aptamer_CG.gro", "r") as f:
@@ -265,19 +272,85 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         with open(complex_gro_path, "w") as f:
             f.writelines(merged_gro)
 
-        # 5. Extract Topology & Mapping Previews
-        dna_top_preview = ""
-        if (wd / "dna.top").exists():
-            with open(wd / "dna.top", "r") as f:
-                dna_top_preview = f.read()
+        # ----------------------------------------------------------------------
+        # 5. Box Solvation & Ionization via insane.py -> system.gro
+        # ----------------------------------------------------------------------
+        # Copy insane.py to working directory if not present
+        if (cg_tools_dir / "insane.py").exists():
+            shutil.copy(cg_tools_dir / "insane.py", wd / "insane.py")
 
-        sys_top_preview = ""
-        if (wd / "system.top").exists():
-            with open(wd / "system.top", "r") as f:
-                sys_top_preview = f.read()
+        insane_cmd = [
+            "python2", "insane.py",
+            "-f", "complex_CG.gro",
+            "-o", "system.gro",
+            "-pbc", "cubic",
+            "-box", "10,10,10",
+            "-salt", "0.15",
+            "-charge", "auto",
+            "-sol", "W"
+        ]
+        insane_proc = subprocess.run(insane_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
 
-        # 6. Generate Reference .map Definitions
-        # In Martini backward mapping, residues map through library files (da.charmm36.map, etc.)
+        # Parse solvent/ion molecules output by insane.py (written to stderr)
+        solvent_molecules = []
+        for line in insane_proc.stderr.splitlines():
+            line_str = line.strip()
+            # insane outputs comment lines with ';', molecule counts lines without ';'
+            if line_str and not line_str.startswith(";"):
+                parts = line_str.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    mol_name = parts[0]
+                    mol_count = parts[1]
+                    # Rename NA+ -> NA, CL- -> CL
+                    mol_name_clean = mol_name.replace("NA+", "NA").replace("CL-", "CL")
+                    solvent_molecules.append(f"{mol_name_clean:<10} {mol_count:>7}\n")
+
+        # Fallback: Count directly from system.gro if insane stderr did not produce lines
+        if not solvent_molecules and (wd / "system.gro").exists():
+            w_count, na_count, cl_count = 0, 0, 0
+            with open(wd / "system.gro", "r") as f:
+                for line in f.readlines()[2:-1]:
+                    resname = line[5:10].strip()
+                    if resname == "W": w_count += 1
+                    elif "NA" in resname: na_count += 1
+                    elif "CL" in resname: cl_count += 1
+            if w_count > 0: solvent_molecules.append(f"{'W':<10} {w_count:>7}\n")
+            if na_count > 0: solvent_molecules.append(f"{'NA':<10} {na_count:>7}\n")
+            if cl_count > 0: solvent_molecules.append(f"{'CL':<10} {cl_count:>7}\n")
+
+        # ----------------------------------------------------------------------
+        # 6. Build the Unified system.top File
+        # ----------------------------------------------------------------------
+        # Copy the required Martini ITP force fields into the workspace
+        for itp_file in ["martini_v2.1P-dna.itp", "martini_v2.0_ions.itp", "martini_v2.2.itp"]:
+            src_itp = cg_tools_dir / itp_file
+            if src_itp.exists():
+                shutil.copy(src_itp, wd / itp_file)
+
+        system_top_lines = [
+            '#include "martini_v2.1P-dna.itp"\n',
+            '#include "martini_v2.0_ions.itp"\n\n',
+            '#define RUBBER_BANDS\n\n',
+            '#include "Protein_A.itp"\n',
+            '#include "Nucleic_A.itp"\n\n',
+            '[ system ]\n',
+            '; name\n',
+            'Martini system from Protein-Nucleic\n\n',
+            '[ molecules ]\n',
+            '; name        number\n',
+            'Protein_A 	 1\n',
+            'Nucleic_A        1\n'
+        ]
+        # Append solvent and ions
+        system_top_lines.extend(solvent_molecules)
+
+        system_top_path = wd / "system.top"
+        with open(system_top_path, "w") as f:
+            f.writelines(system_top_lines)
+
+        # ----------------------------------------------------------------------
+        # 7. Backward Mapping Reference (.map)
+        # ----------------------------------------------------------------------
         map_lines = [
             "; ===================================================\n",
             "; Backward Mapping Definition for Nucleic Acid Aptamer\n",
@@ -285,41 +358,46 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             "[ molecule ]\n", "DNA_Aptamer\n\n",
             "[ martini ]\n", "BB1 BB2 BB3 SC1 SC2 SC3 SC4\n\n",
             "[ mapping ]\n", "charmm36\n\n",
-            "[ residues ]\n"
+            "[ residues ]\n",
+            "DA     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4 (Library: da.charmm36.map)\n",
+            "DT     -> BB1 BB2 BB3 SC1 SC2 SC3     (Library: dt.charmm36.map)\n",
+            "DG     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4 (Library: dg.charmm36.map)\n",
+            "DC     -> BB1 BB2 BB3 SC1 SC2 SC3     (Library: dc.charmm36.map)\n"
         ]
-        dna_mapping_table = [
-            {"Residue": "DA", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3 SC4", "Mapping_File": "da.charmm36.map"},
-            {"Residue": "DT", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3", "Mapping_File": "dt.charmm36.map"},
-            {"Residue": "DG", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3 SC4", "Mapping_File": "dg.charmm36.map"},
-            {"Residue": "DC", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3", "Mapping_File": "dc.charmm36.map"},
-        ]
-        for item in dna_mapping_table:
-            map_lines.append(f"{item['Residue']:<6} -> {item['Beads']:<30} (Library: {item['Mapping_File']})\n")
-
-        map_file_path = wd / "aptamer.map"
-        with open(map_file_path, "w") as f:
+        with open(wd / "aptamer.map", "w") as f:
             f.writelines(map_lines)
 
-        # Package All CG Files into ZIP
+        # ----------------------------------------------------------------------
+        # 8. Package All Files into complex_cg_prep.zip
+        # ----------------------------------------------------------------------
         zip_path = wd / "complex_cg_prep.zip"
         files_to_zip = [
-            "complex_CG.gro", "protein_CG.gro", "aptamer_CG.gro",
-            "protein_CG.pdb", "dna_CG.pdb", "dna.top", "system.top", "aptamer.map"
+            "system.gro", "system.top", "complex_CG.gro", "protein_CG.gro",
+            "aptamer_CG.gro", "protein_CG.pdb", "dna_CG.pdb", "dna.top",
+            "Protein_A.itp", "Nucleic_A.itp", "martini_v2.1P-dna.itp",
+            "martini_v2.0_ions.itp", "aptamer.map"
         ]
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
             for fname in files_to_zip:
                 if (wd / fname).exists():
                     z.write(wd / fname, arcname=fname)
+            # Catch any other generated ITP files (e.g. elastic network rubber bands)
             for itp in wd.glob("*.itp"):
-                z.write(itp, arcname=itp.name)
+                if itp.name not in files_to_zip:
+                    z.write(itp, arcname=itp.name)
+
+        # Previews for Streamlit
+        top_preview = "".join(system_top_lines)
+        gro_preview = ""
+        if (wd / "system.gro").exists():
+            with open(wd / "system.gro", "r") as f:
+                gro_preview = "".join(f.readlines()[:40])
 
         return {
             "status": "success",
             "result_file": str(zip_path),
-            "dna_top_preview": dna_top_preview[:3000],
-            "sys_top_preview": sys_top_preview[:3000],
-            "gro_preview": "".join(merged_gro[:60]),
-            "dna_mapping": dna_mapping_table
+            "sys_top_preview": top_preview,
+            "gro_preview": gro_preview
         }
     except subprocess.CalledProcessError as e:
         err = e.stderr if e.stderr else e.stdout
