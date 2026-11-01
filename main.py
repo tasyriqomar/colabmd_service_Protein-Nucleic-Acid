@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from celery.result import AsyncResult
 from pathlib import Path
+from typing import Optional
 import uuid
 import os
 
@@ -11,6 +12,7 @@ from tasks.worker import (
     run_aptamer_task,
     run_haddock_docking_task,
     run_complex_cg_prep_task,
+    run_backmapping_workflow,
     run_backmapping_task,
     run_trajectory_analysis_task,
     run_plip_analysis_task,
@@ -92,18 +94,65 @@ async def api_complex_cg_prep(
 
 @app.post("/api/v1/run-backmapping")
 async def api_backmapping(
-    xtc: UploadFile = File(...), tpr: UploadFile = File(...),
-    mdp: UploadFile = File(...), ndx: UploadFile = File(...),
-    fixed_pdb: UploadFile = File(...), aptamer_pdb: UploadFile = File(...)
+    protein_pdb: UploadFile = File(...),
+    aptamer_pdb: UploadFile = File(...),
+    xtc_file: UploadFile = File(...),
+    tpr_file: UploadFile = File(...),
+    mdp_file: UploadFile = File(...),
+    ndx_file: UploadFile = File(...),
+    system_gro: UploadFile = File(...),
+    aptamer_map: Optional[UploadFile] = File(None),
+    topol_top: Optional[UploadFile] = File(None),
+    loop_from: int = Form(0),
+    loop_until: int = Form(10),
+    solute_group: int = Form(1)
 ):
     job_id = f"bm_{uuid.uuid4().hex[:10]}"
     work_dir = SHARED_DATA / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
-    task = run_backmapping_task.delay(
-        str(work_dir), await xtc.read(), await tpr.read(),
-        await mdp.read(), await ndx.read(), await fixed_pdb.read(), await aptamer_pdb.read()
+
+    # Save uploaded files into the job directory
+    file_map = {
+        protein_pdb.filename: await protein_pdb.read(),
+        aptamer_pdb.filename: await aptamer_pdb.read(),
+        xtc_file.filename: await xtc_file.read(),
+        tpr_file.filename: await tpr_file.read(),
+        mdp_file.filename: await mdp_file.read(),
+        ndx_file.filename: await ndx_file.read(),
+        system_gro.filename: await system_gro.read()
+    }
+    for filename, content in file_map.items():
+        with open(work_dir / filename, "wb") as f:
+            f.write(content)
+
+    map_name = None
+    if aptamer_map:
+        map_name = aptamer_map.filename
+        with open(work_dir / map_name, "wb") as f:
+            f.write(await aptamer_map.read())
+
+    top_name = None
+    if topol_top:
+        top_name = topol_top.filename
+        with open(work_dir / top_name, "wb") as f:
+            f.write(await topol_top.read())
+
+    task = run_backmapping_workflow.delay(
+        str(work_dir),
+        protein_pdb.filename,
+        aptamer_pdb.filename,
+        xtc_file.filename,
+        tpr_file.filename,
+        mdp_file.filename,
+        ndx_file.filename,
+        system_gro.filename,
+        map_name,
+        top_name,
+        loop_from,
+        loop_until,
+        solute_group
     )
-    return {"task_id": task.id, "job_id": job_id}
+    return {"message": "Backmapping queued.", "task_id": task.id, "job_id": job_id}
 
 @app.post("/api/v1/analysis/trajectory")
 def api_trajectory(payload: dict):
