@@ -307,9 +307,8 @@ with tab3:
 # ------------------------------------------
 with tab4:
     st.header("Step 4: Complex Coarse-Grained Preparation")
-    st.markdown("Parameterize the best docked complex into coarse-grained representation using Martini 2.2 (`martinize.py` & `martinize-dna.py`).")
+    st.markdown("Parameterize the best docked complex into coarse-grained representation (`martinize.py` & `martinize-dna.py`), solvate & ionize with `insane.py`, and construct `system.top`.")
     
-    # 4.1 Input Source Selection
     st.subheader("1. All-Atomic Complex Input")
     has_docking_pose = st.session_state.get("docking_zip_bytes") is not None
     
@@ -338,13 +337,12 @@ with tab4:
     with c2:
         elastic_net = st.checkbox("Enable Elastic Network for Protein (-elastic)", value=True)
 
-    if st.button("Generate Coarse-Grained Complex") and selected_complex_bytes:
+    if st.button("Generate Coarse-Grained Complex & Solvated System") and selected_complex_bytes:
         st.session_state.cg_prep_zip_bytes = None
         st.session_state.cg_gro_preview = ""
-        st.session_state.dna_top_preview = ""
         st.session_state.sys_top_preview = ""
         
-        with st.spinner("Separating chains, coarse-graining protein and nucleic acid, and aligning coordinates..."):
+        with st.spinner("Generating CG models, running insane.py (10x10x10 nm box, 0.15 M NaCl), and writing system.top..."):
             files = {"complex_pdb": ("docked_complex_best.pdb", selected_complex_bytes, "chemical/x-pdb")}
             data = {"dnatype": dnatype, "elastic": elastic_net}
             try:
@@ -362,11 +360,13 @@ with tab4:
                                 if dl.status_code == 200:
                                     st.session_state.cg_prep_zip_bytes = dl.content
                                     st.session_state.cg_gro_preview = t_res.get("gro_preview", "")
-                                    st.session_state.dna_top_preview = t_res.get("dna_top_preview", "")
                                     st.session_state.sys_top_preview = t_res.get("sys_top_preview", "")
-                                    status_ph.success("✅ Coarse-graining, topology generation, and .gro coordinate alignment complete!")
+                                    status_ph.success("✅ Coarse-graining, solvation (system.gro), and system.top generation complete!")
                                     time.sleep(1)
                                     st.rerun()
+                            else:
+                                err_m = t_res.get("message", "Task failed.") if isinstance(t_res, dict) else str(t_res)
+                                status_ph.error(f"❌ Error: {err_m}")
                             break
                         elif st_val == "FAILED":
                             status_ph.error("❌ Coarse-graining task failed on Colab.")
@@ -378,33 +378,12 @@ with tab4:
     # 4.2 Topology Mapping & Previews
     if st.session_state.get("cg_prep_zip_bytes"):
         st.markdown("---")
-        st.subheader("2. Topology Mapping & Previews")
-        
-        top_col1, top_col2 = st.columns(2)
-        with top_col1:
-            st.markdown("**DNA Aptamer Topology (`dna.top`)**")
-            st.text_area("dna.top preview", value=st.session_state.get("dna_top_preview", ""), height=260)
-        with top_col2:
-            st.markdown("**Protein System Topology (`system.top`)**")
-            st.text_area("system.top preview", value=st.session_state.get("sys_top_preview", ""), height=260)
+        st.subheader("2. Generated `system.top` Topology")
+        st.code(st.session_state.get("sys_top_preview", ""), language="ini")
 
-        # 4.3 Coordinate-Aligned .gro Output
         st.markdown("---")
-        st.subheader("3. Docked Coarse-Grained Coordinate File (`complex_CG.gro`)")
-        st.text_area("GRO Coordinate Header & Beads Preview", value=st.session_state.get("cg_gro_preview", ""), height=220)
-
-        # 4.4 Backward .map File Definitions
-        st.markdown("---")
-        st.subheader("4. Backward `.map` Definitions")
-        st.info("In standard Martini backward mapping, amino acids and standard nucleotides use the built-in library mappings (`Mapping/*.map`). Custom atom-to-bead assignments for your aptamer are packaged below.")
-        
-        mapping_df = pd.DataFrame([
-            {"Residue": "DA", "Martini Beads": "BB1, BB2, BB3, SC1, SC2, SC3, SC4", "Mapping Target": "da.charmm36.map"},
-            {"Residue": "DT", "Martini Beads": "BB1, BB2, BB3, SC1, SC2, SC3", "Mapping Target": "dt.charmm36.map"},
-            {"Residue": "DG", "Martini Beads": "BB1, BB2, BB3, SC1, SC2, SC3, SC4", "Mapping Target": "dg.charmm36.map"},
-            {"Residue": "DC", "Martini Beads": "BB1, BB2, BB3, SC1, SC2, SC3", "Mapping Target": "dc.charmm36.map"},
-        ])
-        st.table(mapping_df)
+        st.subheader("3. Solvated & Ionized Coordinate File (`system.gro`)")
+        st.text_area("system.gro Preview (Header & First Atoms)", value=st.session_state.get("cg_gro_preview", ""), height=220)
 
         st.markdown("---")
         st.download_button(
