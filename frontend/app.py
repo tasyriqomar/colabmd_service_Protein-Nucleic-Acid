@@ -413,71 +413,116 @@ with tab5:
     st.caption("After completing CGMD, bring `dynamic_fitted.xtc`, `dynamic.tpr`, `dynamic.mdp`, `index.ndx`, `fixed.pdb`, and `aptamer_relaxed.pdb` into Tab 6.")
 
 # ------------------------------------------
-# TAB 6: BACKMAPPING
-# ------------------------------------------
+# TAB 6: BACKMAPPING (CG TO ALL-ATOM RESOLUTION)
+# ==========================================
 with tab6:
     st.header("Step 6: Backmapping (CG to All-Atom Resolution)")
-    st.markdown("Run the automated `Dr_Tasyriq_V4_M2.sh` backmapping loop to reconstruct all-atom trajectories.")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        bm_xtc = st.file_uploader("1. Upload dynamic_fitted.xtc", type=["xtc"], key="bm_xtc_up")
-        bm_tpr = st.file_uploader("2. Upload dynamic.tpr", type=["tpr"], key="bm_tpr_up")
-        bm_mdp = st.file_uploader("3. Upload dynamic.mdp", type=["mdp"], key="bm_mdp_up")
-    with c2:
-        bm_ndx = st.file_uploader("4. Upload index.ndx", type=["ndx", "txt"], key="bm_ndx_up")
-        bm_fixed = st.file_uploader("5. Upload fixed.pdb (Protein AA)", type=["pdb"], key="bm_fix_up")
-        bm_apt = st.file_uploader("6. Upload aptamer_relaxed.pdb (Aptamer AA)", type=["pdb"], key="bm_apt_up")
+    st.markdown("Upload your CGMD simulation files and topologies to convert back to all-atom resolution.")
 
-    all_bm_files = [bm_xtc, bm_tpr, bm_mdp, bm_ndx, bm_fixed, bm_apt]
+    col1, col2 = st.columns(2)
+    with col1:
+        protein_pdb_bm = st.file_uploader("1. Upload protein.pdb (AA)", type=["pdb"], key="prot_bm")
+        aptamer_pdb_bm = st.file_uploader("2. Upload aptamer_relaxed.pdb (AA)", type=["pdb"], key="apt_bm")
+        xtc_file = st.file_uploader("3. Upload dynamic_fitted.xtc", type=["xtc"], key="xtc_bm")
+        tpr_file = st.file_uploader("4. Upload dynamic.tpr (CG)", type=["tpr"], key="tpr_bm")
+        mdp_file = st.file_uploader("5. Upload dynamic.mdp", type=["mdp"], key="mdp_bm")
+    with col2:
+        ndx_file = st.file_uploader("6. Upload index.ndx (CG)", type=["ndx", "txt"], key="ndx_bm")
+        system_gro = st.file_uploader("7. Upload system.gro (CGMD)", type=["gro"], key="sys_gro_bm")
+        aptamer_map = st.file_uploader("8. Upload aptamer.map (from Tab 4, Optional)", type=["map"], key="map_bm")
+        topol_top = st.file_uploader("9. Upload topol.top (AA, Optional)", type=["top"], key="top_bm")
 
-    if st.button("Run Backmapping Pipeline"):
+        st.markdown("#### Frame Loop Settings")
+        c_l1, c_l2 = st.columns(2)
+        with c_l1:
+            loop_from = st.number_input("Loop from (ns):", min_value=0, max_value=1000, value=0, step=1, key="bm_loop_from")
+        with c_l2:
+            loop_until = st.number_input("Loop until (ns):", min_value=1, max_value=1000, value=10, step=1, key="bm_loop_until")
+            
+        solute_group = st.number_input("CG Solute Group Index (Default: 1)", value=1, step=1, key="bm_solute_group")
+
+    all_files = [protein_pdb_bm, aptamer_pdb_bm, xtc_file, tpr_file, mdp_file, ndx_file, system_gro]
+
+    if st.button("Run Backmapping"):
         st.session_state.bm_task_id = None
-        if not all(all_bm_files):
-            st.warning("⚠️ Please upload all 6 required files.")
-        else:
-            with st.spinner("Executing automated Backmapping loop on Colab..."):
-                files = {
-                    "xtc": (bm_xtc.name, bm_xtc.getvalue()),
-                    "tpr": (bm_tpr.name, bm_tpr.getvalue()),
-                    "mdp": (bm_mdp.name, bm_mdp.getvalue()),
-                    "ndx": (bm_ndx.name, bm_ndx.getvalue()),
-                    "fixed_pdb": (bm_fixed.name, bm_fixed.getvalue()),
-                    "aptamer_pdb": (bm_apt.name, bm_apt.getvalue())
-                }
-                res = requests.post(f"{API_URL}/run-backmapping", files=files)
-                if res.status_code == 200:
-                    task_id = res.json()["task_id"]
-                    status_ph = st.empty()
-                    while True:
-                        s_res = requests.get(f"{API_URL}/status/{task_id}").json()
-                        st_val = s_res["status"]
-                        if st_val == "SUCCESS":
-                            t_res = s_res.get("result", {})
-                            res_file = t_res.get("result_file", "")
-                            if res_file:
-                                extracted_job_id = res_file.replace('\\', '/').split('/')[-2]
-                                st.session_state["job_id"] = extracted_job_id
-                                st.session_state["traj_job_id"] = extracted_job_id
-                                st.session_state["plip_job_id"] = extracted_job_id
-                                st.session_state["mmgbsa_job_id"] = extracted_job_id
-                                st.session_state["pca_job_id"] = extracted_job_id
-                            
-                            st.session_state["bm_task_id"] = task_id
-                            time.sleep(1)
-                            st.rerun()
-                            break
-                        elif st_val == "FAILED":
-                            status_ph.error("❌ Backmapping failed.")
-                            break
-                        time.sleep(3)
 
+        if not all(all_files):
+            st.warning("⚠️ Please upload all required files (1–7).")
+        elif loop_from > loop_until:
+            st.error("❌ 'Loop from' must be less than or equal to 'Loop until'.")
+        else:
+            with st.spinner(f"Running Backmapping loop from {loop_from} ns to {loop_until} ns on Colab..."):
+                files = {
+                    "protein_pdb": (protein_pdb_bm.name, protein_pdb_bm.getvalue(), "chemical/x-pdb"),
+                    "aptamer_pdb": (aptamer_pdb_bm.name, aptamer_pdb_bm.getvalue(), "chemical/x-pdb"),
+                    "xtc_file": (xtc_file.name, xtc_file.getvalue(), "application/octet-stream"),
+                    "tpr_file": (tpr_file.name, tpr_file.getvalue(), "application/octet-stream"),
+                    "mdp_file": (mdp_file.name, mdp_file.getvalue(), "text/plain"),
+                    "ndx_file": (ndx_file.name, ndx_file.getvalue(), "text/plain"),
+                    "system_gro": (system_gro.name, system_gro.getvalue(), "text/plain")
+                }
+                if aptamer_map:
+                    files["aptamer_map"] = (aptamer_map.name, aptamer_map.getvalue(), "text/plain")
+                if topol_top:
+                    files["topol_top"] = (topol_top.name, topol_top.getvalue(), "text/plain")
+
+                data = {
+                    "loop_from": loop_from,
+                    "loop_until": loop_until,
+                    "solute_group": solute_group
+                }
+
+                try:
+                    response = requests.post(f"{API_URL}/run-backmapping", files=files, data=data)
+
+                    if response.status_code == 200:
+                        task_id = response.json()["task_id"]
+                        status_placeholder = st.empty()
+
+                        while True:
+                            status_res = requests.get(f"{API_URL}/status/{task_id}").json()
+                            status = status_res["status"]
+
+                            if status == "SUCCESS":
+                                task_result = status_res.get("result", {})
+                                if task_result.get("status") == "success":
+                                    res_file_path = task_result.get("result_file", "")
+                                    if res_file_path:
+                                        extracted_job_id = res_file_path.replace('\\', '/').split('/')[-2]
+
+                                        # Auto-propagate Job ID to master state and downstream analysis tabs
+                                        st.session_state["job_id"] = extracted_job_id
+                                        st.session_state["traj_job_id"] = extracted_job_id
+                                        st.session_state["plip_job_id"] = extracted_job_id
+                                        st.session_state["mmgbsa_job_id"] = extracted_job_id
+                                        st.session_state["pca_job_id"] = extracted_job_id
+
+                                    # Save task ID to keep the download section visible across tab navigation
+                                    st.session_state["bm_task_id"] = task_id
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    status_placeholder.error(f"❌ Failed: {task_result.get('message')}")
+                                break
+                            elif status == "FAILED":
+                                status_placeholder.error("❌ Celery Task Failed on Colab.")
+                                break
+                            else:
+                                status_placeholder.info(f"⏳ Status: {status} (Reconstructing all-atom frames {loop_from} to {loop_until} ns...)")
+                                time.sleep(3)
+                    else:
+                        st.error(f"Error {response.status_code}: {response.text}")
+                except Exception as e:
+                    st.error(f"Connection error: {e}")
+
+    # --- PERSISTENT DOWNLOAD & LINKING DISPLAY (Rendered outside button click) ---
     if st.session_state.get("bm_task_id") and st.session_state.get("job_id"):
         st.markdown("---")
-        st.success(f"✅ Backmapping Complete! **Linked Job ID:** `{st.session_state.job_id}`")
+        st.success(f"✅ Backmapping Complete! **Job ID:** `{st.session_state.job_id}`")
+
         dl_url = f"{API_URL}/download-prep-result/{st.session_state.bm_task_id}"
         st.markdown(f"### [⬇️ Click Here to Download Backmapped Trajectories (.zip)]({dl_url})")
-        st.info("🔗 **Job ID auto-propagated to Tabs 7, 8, 9, and 10.**")
+        st.info("🔗 **Job ID auto-linked to Tabs 7–10!** You can now open Tabs 7 through 10 directly without manually re-entering your Job ID.")
 
 # ------------------------------------------
 # TAB 7: TRAJECTORY ANALYSIS
