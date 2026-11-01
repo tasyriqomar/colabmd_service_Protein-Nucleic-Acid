@@ -166,7 +166,169 @@ cmrest = {"true" if cmrest else "false"}
         return {"status": "failed", "message": f"HADDOCK3 Docking Error: {str(e)}"}
 
 # ==============================================================================
-# TAB 5: BACKMAPPING
+# TAB 4: COMPLEX COARSE-GRAINED PREPARATION (PROTEIN + NUCLEIC ACID)
+# ==============================================================================
+@celery_app.task
+def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype: str = "ss", elastic: bool = True):
+    wd = Path(work_dir)
+    wd.mkdir(parents=True, exist_ok=True)
+    try:
+        cg_tools_dir = Path("/app/tools/CGMD")
+        complex_pdb = wd / "docked_complex_best.pdb"
+        with open(complex_pdb, "wb") as f:
+            f.write(complex_pdb_content)
+
+        # 1. Split docked_complex_best.pdb into Chain A (Protein) and Chain B (DNA/RNA)
+        prot_aa_pdb = wd / "protein_aa.pdb"
+        dna_aa_pdb = wd / "dna_aa.pdb"
+
+        prot_lines = []
+        dna_lines = []
+        with open(complex_pdb, "r") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    chain = line[21].strip()
+                    if chain == "A":
+                        prot_lines.append(line)
+                    elif chain == "B":
+                        dna_lines.append(line)
+
+        if not prot_lines or not dna_lines:
+            # Fallback based on residue names if chain identifiers were omitted
+            dna_resnames = {"DA", "DT", "DG", "DC", "A", "T", "G", "C", "U"}
+            prot_lines, dna_lines = [], []
+            with open(complex_pdb, "r") as f:
+                for line in f:
+                    if line.startswith(("ATOM", "HETATM")):
+                        resn = line[17:20].strip()
+                        if resn in dna_resnames:
+                            dna_lines.append(line[:21] + "B" + line[22:])
+                        else:
+                            prot_lines.append(line[:21] + "A" + line[22:])
+
+        with open(prot_aa_pdb, "w") as f:
+            f.writelines(prot_lines)
+            f.write("END\n")
+
+        with open(dna_aa_pdb, "w") as f:
+            f.writelines(dna_lines)
+            f.write("END\n")
+
+        # 2. Coarse-Grain DNA Aptamer using martinize-dna.py
+        subprocess.run(["gmx", "editconf", "-f", "dna_aa.pdb", "-o", "dna_aa.gro"], cwd=str(wd), check=True, capture_output=True)
+        dna_cmd = [
+            "python2", str(cg_tools_dir / "martinize-dna.py"),
+            "-dnatype", dnatype,
+            "-f", "dna_aa.gro",
+            "-o", "dna.top",
+            "-x", "dna_CG.pdb"
+        ]
+        subprocess.run(dna_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
+        subprocess.run(["gmx", "editconf", "-f", "dna_CG.pdb", "-o", "aptamer_CG.gro"], cwd=str(wd), check=True, capture_output=True)
+
+        # 3. Coarse-Grain Protein using martinize.py
+        prot_cmd = [
+            "python2", str(cg_tools_dir / "martinize.py"),
+            "-f", "protein_aa.pdb",
+            "-o", "system.top",
+            "-x", "protein_CG.pdb",
+            "-p", "backbone",
+            "-ff", "martini22"
+        ]
+        if elastic:
+            prot_cmd.append("-elastic")
+        subprocess.run(prot_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
+        subprocess.run(["gmx", "editconf", "-f", "protein_CG.pdb", "-o", "protein_CG.gro"], cwd=str(wd), check=True, capture_output=True)
+
+        # 4. Generate Merged complex_CG.gro Preserving Docked Coordinates
+        with open(wd / "protein_CG.gro", "r") as f:
+            p_gro_lines = f.readlines()
+        with open(wd / "aptamer_CG.gro", "r") as f:
+            d_gro_lines = f.readlines()
+
+        p_atoms = p_gro_lines[2:-1]
+        d_atoms = d_gro_lines[2:-1]
+        total_atoms = len(p_atoms) + len(d_atoms)
+        box_vector = p_gro_lines[-1] if len(p_gro_lines) > 2 else "  10.00000  10.00000  10.00000\n"
+
+        merged_gro = ["Complex Coarse-Grained Structure from Docked Pose\n", f"{total_atoms:>5}\n"]
+        atom_count = 1
+        for line in p_atoms:
+            merged_gro.append(f"{line[:15]}{atom_count:>5}{line[20:]}")
+            atom_count += 1
+        for line in d_atoms:
+            merged_gro.append(f"{line[:15]}{atom_count:>5}{line[20:]}")
+            atom_count += 1
+        merged_gro.append(box_vector)
+
+        complex_gro_path = wd / "complex_CG.gro"
+        with open(complex_gro_path, "w") as f:
+            f.writelines(merged_gro)
+
+        # 5. Extract Topology & Mapping Previews
+        dna_top_preview = ""
+        if (wd / "dna.top").exists():
+            with open(wd / "dna.top", "r") as f:
+                dna_top_preview = f.read()
+
+        sys_top_preview = ""
+        if (wd / "system.top").exists():
+            with open(wd / "system.top", "r") as f:
+                sys_top_preview = f.read()
+
+        # 6. Generate Reference .map Definitions
+        # In Martini backward mapping, residues map through library files (da.charmm36.map, etc.)
+        map_lines = [
+            "; ===================================================\n",
+            "; Backward Mapping Definition for Nucleic Acid Aptamer\n",
+            "; ===================================================\n",
+            "[ molecule ]\n", "DNA_Aptamer\n\n",
+            "[ martini ]\n", "BB1 BB2 BB3 SC1 SC2 SC3 SC4\n\n",
+            "[ mapping ]\n", "charmm36\n\n",
+            "[ residues ]\n"
+        ]
+        dna_mapping_table = [
+            {"Residue": "DA", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3 SC4", "Mapping_File": "da.charmm36.map"},
+            {"Residue": "DT", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3", "Mapping_File": "dt.charmm36.map"},
+            {"Residue": "DG", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3 SC4", "Mapping_File": "dg.charmm36.map"},
+            {"Residue": "DC", "Beads": "BB1 BB2 BB3 SC1 SC2 SC3", "Mapping_File": "dc.charmm36.map"},
+        ]
+        for item in dna_mapping_table:
+            map_lines.append(f"{item['Residue']:<6} -> {item['Beads']:<30} (Library: {item['Mapping_File']})\n")
+
+        map_file_path = wd / "aptamer.map"
+        with open(map_file_path, "w") as f:
+            f.writelines(map_lines)
+
+        # Package All CG Files into ZIP
+        zip_path = wd / "complex_cg_prep.zip"
+        files_to_zip = [
+            "complex_CG.gro", "protein_CG.gro", "aptamer_CG.gro",
+            "protein_CG.pdb", "dna_CG.pdb", "dna.top", "system.top", "aptamer.map"
+        ]
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for fname in files_to_zip:
+                if (wd / fname).exists():
+                    z.write(wd / fname, arcname=fname)
+            for itp in wd.glob("*.itp"):
+                z.write(itp, arcname=itp.name)
+
+        return {
+            "status": "success",
+            "result_file": str(zip_path),
+            "dna_top_preview": dna_top_preview[:3000],
+            "sys_top_preview": sys_top_preview[:3000],
+            "gro_preview": "".join(merged_gro[:60]),
+            "dna_mapping": dna_mapping_table
+        }
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if e.stderr else e.stdout
+        return {"status": "failed", "message": f"CG Preparation Error: {err}"}
+    except Exception as e:
+        return {"status": "failed", "message": str(e)}
+
+# ==============================================================================
+# TAB 6: BACKMAPPING
 # ==============================================================================
 @celery_app.task
 def run_backmapping_task(work_dir: str, xtc: bytes, tpr: bytes, mdp: bytes, ndx: bytes, fixed_pdb: bytes, apt_pdb: bytes):
@@ -226,7 +388,7 @@ def run_backmapping_task(work_dir: str, xtc: bytes, tpr: bytes, mdp: bytes, ndx:
         return {"status": "failed", "message": str(e)}
 
 # ==============================================================================
-# TAB 6: TRAJECTORY ANALYSIS (RMSD, RMSF, Rg)
+# TAB 7: TRAJECTORY ANALYSIS (RMSD, RMSF, Rg)
 # ==============================================================================
 @celery_app.task
 def run_trajectory_analysis_task(job_id: str, rmsd_group: int = 4, rmsf_group: int = 1, rg_group: int = 1):
@@ -281,7 +443,7 @@ def run_trajectory_analysis_task(job_id: str, rmsd_group: int = 4, rmsf_group: i
         return {"status": "error", "message": str(e)}
 
 # ==============================================================================
-# TAB 7: PLIP INTERACTION PROFILING
+# TAB 8: PLIP INTERACTION PROFILING
 # ==============================================================================
 @celery_app.task
 def run_plip_analysis_task(job_id: str):
@@ -343,7 +505,7 @@ def run_plip_analysis_task(job_id: str):
         return {"status": "error", "message": str(e)}
 
 # ==============================================================================
-# TAB 8: MM-GBSA (PROTEIN - NUCLEIC ACID)
+# TAB 9: MM-GBSA (PROTEIN - NUCLEIC ACID)
 # ==============================================================================
 @celery_app.task
 def run_mmpbsa_task(job_id: str, protein_idx: int = 1, ligand_idx: int = 12, start_frame: int = 1, end_frame: int = 0):
@@ -390,7 +552,7 @@ def run_mmpbsa_task(job_id: str, protein_idx: int = 1, ligand_idx: int = 12, sta
         return {"status": "error", "message": f"MM-GBSA Error: {str(e)}"}
 
 # ==============================================================================
-# TAB 9: PCA & FEL (NO PYMOL)
+# TAB 10: PCA & FEL (NO PYMOL)
 # ==============================================================================
 @celery_app.task
 def run_pca_fel_task(job_id: str, backbone_group: int = 4):
