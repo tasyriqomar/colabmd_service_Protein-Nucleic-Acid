@@ -664,15 +664,15 @@ with tab9:
         st.info("⏳ Waiting for Backmapping (Tab 6) or paste your Job ID above.")
     else:
         st.session_state.job_id = job_id_mm
-        c1, c2 = st.columns(2)
-        with c1:
-            prot_idx = st.number_input("Protein Group Index (from index.ndx)", value=1, step=1, key="prot_idx_in")
-        with c2:
-            na_idx = st.number_input("DNA/RNA Aptamer Group Index (from index.ndx)", value=12, step=1, key="na_idx_in")
+        col1, col2 = st.columns(2)
+        with col1:
+            prot_idx = st.number_input("Receptor: Protein Group Index (from index.ndx)", min_value=0, max_value=50, value=1, step=1, key="receptor_group_in")
+        with col2:
+            na_idx = st.number_input("Ligand: DNA Aptamer Group Index (from index.ndx)", min_value=0, max_value=50, value=12, step=1, key="ligand_group_in")
 
         if st.button("Execute MM-GBSA Calculation"):
             if int(prot_idx) == int(na_idx):
-                st.error("❌ Receptor and Ligand groups must be different! Typically, Protein is Group 1 and DNA Aptamer is Group 12.")
+                st.error("❌ Receptor and Ligand groups must be different! Protein is Group 1 and DNA is Group 12.")
             else:
                 st.session_state.mmgbsa_zip_bytes = None
                 st.session_state.mmgbsa_summary = ""
@@ -684,38 +684,36 @@ with tab9:
                         "ligand_idx": int(na_idx)
                     }
                     res = requests.post(f"{API_URL}/analysis/mmpbsa", json=payload)
-                if res.status_code == 200:
-                    task_id = res.json()["task_id"]
-                    status_ph = st.empty()
-                    while True:
-                        s_res = requests.get(f"{API_URL}/status/{task_id}").json()
-                        st_val = s_res["status"]
-                        if st_val == "SUCCESS":
-                            t_res = s_res.get("result", {})
-                            if isinstance(t_res, dict) and t_res.get("status") == "success":
-                                dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
-                                
-                                # Verify valid ZIP magic bytes ('PK\x03\x04')
-                                if dl.status_code == 200 and dl.content.startswith(b"PK"):
-                                    st.session_state.mmgbsa_zip_bytes = dl.content
-                                    st.session_state.mmgbsa_summary = t_res.get("summary_data", "")
-                                    status_ph.success("✅ MM-GBSA Calculation Complete!")
-                                    time.sleep(1)
-                                    st.rerun()
+                    if res.status_code == 200:
+                        task_id = res.json()["task_id"]
+                        status_ph = st.empty()
+                        while True:
+                            s_res = requests.get(f"{API_URL}/status/{task_id}").json()
+                            st_val = s_res["status"]
+                            if st_val == "SUCCESS":
+                                t_res = s_res.get("result", {})
+                                if isinstance(t_res, dict) and t_res.get("status") == "success":
+                                    dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
+                                    if dl.status_code == 200 and dl.content.startswith(b"PK"):
+                                        st.session_state.mmgbsa_zip_bytes = dl.content
+                                        st.session_state.mmgbsa_summary = t_res.get("summary_data", "")
+                                        status_ph.success("✅ MM-GBSA Calculation Complete!")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        status_ph.error("❌ Received invalid file from server.")
                                 else:
-                                    status_ph.error("❌ The server returned an invalid file. Check Colab logs.")
+                                    err_msg = t_res.get("message", "MM-GBSA calculation failed.") if isinstance(t_res, dict) else str(t_res)
+                                    status_ph.error(f"❌ MM-GBSA Error: {err_msg}")
+                                break
+                            elif st_val == "FAILED":
+                                status_ph.error("❌ Celery Task Failed on Colab.")
+                                break
                             else:
-                                err_msg = t_res.get("message", "MM-GBSA calculation failed.") if isinstance(t_res, dict) else str(t_res)
-                                status_ph.error(f"❌ MM-GBSA Error: {err_msg}")
-                            break
-                        elif st_val == "FAILED":
-                            status_ph.error("❌ Celery Task Failed on Colab.")
-                            break
-                        else:
-                            status_ph.info(f"⏳ Status: {st_val} (Evaluating enthalpy & solvation free energies...)")
-                            time.sleep(3)
-                else:
-                    st.error(f"API Error {res.status_code}: {res.text}")
+                                status_ph.info(f"⏳ Status: {st_val} (Evaluating enthalpy & solvation free energies...)")
+                                time.sleep(3)
+                    else:
+                        st.error(f"API Error {res.status_code}: {res.text}")
 
     if st.session_state.get("mmgbsa_summary"):
         st.subheader("📊 Binding Free Energy Summary ($\Delta G_{\\text{bind}}$)")
