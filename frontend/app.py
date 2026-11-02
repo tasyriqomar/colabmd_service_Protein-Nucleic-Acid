@@ -643,10 +643,20 @@ with tab8:
         )
         try:
             with zipfile.ZipFile(io.BytesIO(st.session_state.plip_zip_bytes)) as z:
-                pngs = [f for f in z.namelist() if f.endswith(('.png', '.jpg'))]
-                if pngs:
+                # Deduplicate by basename so each plot is only rendered once
+                seen_filenames = set()
+                unique_png_paths = []
+                
+                for f in z.namelist():
+                    if f.endswith(('.png', '.jpg')):
+                        base_name = os.path.basename(f)
+                        if base_name and base_name not in seen_filenames:
+                            seen_filenames.add(base_name)
+                            unique_png_paths.append(f)
+                
+                if unique_png_paths:
                     cols = st.columns(2)
-                    for i, p in enumerate(pngs):
+                    for i, p in enumerate(sorted(unique_png_paths)):
                         with cols[i % 2]:
                             st.image(z.read(p), caption=os.path.basename(p), use_container_width=True)
         except Exception as e:
