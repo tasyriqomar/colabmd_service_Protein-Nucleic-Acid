@@ -671,16 +671,19 @@ with tab9:
             na_idx = st.number_input("DNA/RNA Aptamer Group Index (from index.ndx)", value=12, step=1, key="na_idx_in")
 
         if st.button("Execute MM-GBSA Calculation"):
-            st.session_state.mmgbsa_zip_bytes = None
-            st.session_state.mmgbsa_summary = ""
-            with st.spinner("Computing binding free energies via gmx_MMPBSA on Colab..."):
-                payload = {
-                    "job_id": job_id_mm,
-                    "ligand_name": "DNA",
-                    "protein_idx": int(prot_idx),
-                    "ligand_idx": int(na_idx)
-                }
-                res = requests.post(f"{API_URL}/analysis/mmpbsa", json=payload)
+            if int(prot_idx) == int(na_idx):
+                st.error("❌ Receptor and Ligand groups must be different! Typically, Protein is Group 1 and DNA Aptamer is Group 12.")
+            else:
+                st.session_state.mmgbsa_zip_bytes = None
+                st.session_state.mmgbsa_summary = ""
+                with st.spinner("Computing binding free energies via gmx_MMPBSA on Colab..."):
+                    payload = {
+                        "job_id": job_id_mm,
+                        "ligand_name": "DNA",
+                        "protein_idx": int(prot_idx),
+                        "ligand_idx": int(na_idx)
+                    }
+                    res = requests.post(f"{API_URL}/analysis/mmpbsa", json=payload)
                 if res.status_code == 200:
                     task_id = res.json()["task_id"]
                     status_ph = st.empty()
