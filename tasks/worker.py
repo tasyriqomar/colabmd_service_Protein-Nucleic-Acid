@@ -1063,10 +1063,17 @@ def run_plip_analysis_task(job_id: str):
             elif (analysis_dir / script).exists():
                 subprocess.run([sys.executable, script], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
 
-        # Copy all generated plot images and CSV tables into analysis_dir root for zipping
-        for ext in ["*.png", "*.jpg", "*.csv"]:
+        # Move generated plot images to analysis_dir root to prevent duplicates in split_pdbs
+        for ext in ["*.png", "*.jpg"]:
             for f in split_dir.glob(ext):
-                shutil.copy2(f, analysis_dir / f.name)
+                dest = analysis_dir / f.name
+                if dest.exists():
+                    dest.unlink()
+                shutil.move(str(f), str(dest))
+
+        # Copy CSV files to root while leaving originals in split_pdbs
+        for f in split_dir.glob("*.csv"):
+            shutil.copy2(f, analysis_dir / f.name)
 
         # Step 9: Package final output archive
         zip_path = work_dir / "plip_results.zip"
