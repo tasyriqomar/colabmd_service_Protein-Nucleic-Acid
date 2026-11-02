@@ -174,6 +174,9 @@ with tab3:
     st.header("Step 3: Rigid-Body Docking Processing (HADDOCK3)")
     st.markdown("Perform macromolecular docking between the protein receptor and nucleic acid aptamer.")
     
+    st.info("💡 **Don't have a protein structure?** Generate one using [AlphaFold2.ipynb](https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2.ipynb#scrollTo=G4yBrceuFbf3)")
+    st.markdown("---")
+    
     c1, c2 = st.columns(2)
     with c1:
         prot_dock_file = st.file_uploader("Upload Protein PDB (Chain A)", type=["pdb"], key="prot_dock_up")
@@ -181,7 +184,7 @@ with tab3:
     with c2:
         dna_dock_file = st.file_uploader("Upload Aptamer PDB (Chain B)", type=["pdb"], key="dna_dock_up")
         cm_restraints = st.checkbox("Center-of-Mass Restraints (ab-initio)", value=True)
-
+    
     if st.button("Run HADDOCK3 Docking") and prot_dock_file and dna_dock_file:
         st.session_state.docking_zip_bytes = None
         st.session_state.docking_scores_df = None
