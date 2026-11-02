@@ -1192,30 +1192,37 @@ def parse_decomp():
         return
     
     data = []
-    in_deltas = False
     with open(dat_file, 'r') as f:
-        for line in f:
-            if line.startswith("DELTAS:"):
-                in_deltas = True
-                continue
-            if in_deltas:
-                if line.startswith("Total Energy Decomposition:"): continue
-                if line.startswith("Residue") or line.startswith("---") or not line.strip(): continue
-                parts = line.split()
-                if len(parts) >= 7:
-                    try:
-                        if parts[2] in ['R', 'L']:
-                            data.append({'Residue': f"{parts[0]}{parts[1]}", 'Loc': parts[2], 'Total': float(parts[-1])})
-                        elif parts[1] in ['R', 'L']:
-                            data.append({'Residue': parts[0], 'Loc': parts[1], 'Total': float(parts[-1])})
-                    except Exception:
-                        pass
+        text = f.read()
+        
+    deltas = text.split("DELTAS:")
+    if len(deltas) < 2:
+        return
+        
+    lines = deltas[1].splitlines()
+    for line in lines:
+        if line.startswith("Residue") or line.startswith(",") or not line.strip() or line.startswith("Total"): continue
+        parts = line.split(',')
+        if len(parts) >= 19:
+            res_info = parts[0]
+            tokens = res_info.split(':')
+            if len(tokens) >= 4:
+                loc = tokens[0]        # 'R' or 'L'
+                resname = tokens[2]    # 'THR' or 'DA'
+                resid = tokens[3]      # '57' or '5'
+                try:
+                    # Index 16 from left, or -3 from right is the Total Avg
+                    total_val = float(parts[-3])
+                    data.append({'Residue': f"{resname}{resid}", 'Loc': loc, 'Total': total_val})
+                except Exception:
+                    pass
                         
     if not data: return
     df = pd.DataFrame(data)
     
     # Filter for favorable negative energies and plot top 40 contributors
     df = df[df['Total'] < -0.1].sort_values('Total')
+    if df.empty: return
     df_top = df.head(40)
     
     plt.figure(figsize=(14, 7))
