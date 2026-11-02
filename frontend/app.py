@@ -408,7 +408,7 @@ with tab5:
     3. **Centering:** Remove periodic boundary condition jumps (`gmx trjconv -pbc mol -center`).
     """)
     
-    colab_url_cgmd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/CloudMD_Edu_Colab_Protein_NucleicAcid.ipynb#scrollTo=xJRr9g6-za6x"
+    colab_url_cgmd = "https://colab.research.google.com/drive/1TOttFsAMuB2dJ2Cownu3IT9y9SuV7dU0"
     st.markdown(f'<a href="{colab_url_cgmd}" target="_blank"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height:38px;"/></a>', unsafe_allow_html=True)
     st.caption("After completing CGMD, bring `dynamic_fitted.xtc`, `dynamic.tpr`, `dynamic.mdp`, `index.ndx`, `fixed.pdb`, and `aptamer_relaxed.pdb` into Tab 6.")
 
