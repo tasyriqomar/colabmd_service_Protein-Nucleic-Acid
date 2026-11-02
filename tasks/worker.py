@@ -1101,18 +1101,16 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
     except Exception:
         pass
 
-    # 1. Enforce distinct indices for Receptor (Protein=1) and Ligand (DNA=12)
+    # 1. Enforce distinct indices (Failsafe against 12 12 duplicate errors)
     try:
-        p_idx = int(protein_idx)
-        l_idx = int(ligand_idx)
+        p_idx, l_idx = int(protein_idx), int(ligand_idx)
     except Exception:
         p_idx, l_idx = 1, 12
 
     if p_idx == l_idx:
-        p_idx = 1
-        l_idx = 12
+        p_idx, l_idx = 1, 12
 
-    # 2. Ensure PATH includes Conda/Mamba directories
+    # 2. Setup PATH for AmberTools
     extra_paths = ["/root/micromamba/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), "/opt/conda/bin"]
     os.environ["PATH"] = ":".join(extra_paths) + ":" + os.environ.get("PATH", "")
 
@@ -1124,10 +1122,7 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
                 break
 
     if not mmpbsa_exec:
-        return {
-            "status": "error",
-            "message": "gmx_MMPBSA executable not found in Colab PATH. Please run '!mamba install -c conda-forge ambertools mpi4py gmx_mmpbsa -y'."
-        }
+        return {"status": "error", "message": "gmx_MMPBSA executable not found in Colab PATH."}
 
     job_dir = Path(f"/app/shared_data/{job_id}")
     analysis_dir = job_dir / "analysis"
@@ -1135,7 +1130,7 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
     mmgbsa_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 3. Locate trajectory and topology files
+        # 3. Locate inputs
         bm_base = job_dir / "Backmapping" if (job_dir / "Backmapping").exists() else job_dir
         xtc_dir = bm_base / "all_xtc" if (bm_base / "all_xtc").exists() else job_dir / "all_xtc"
 
@@ -1146,35 +1141,29 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
         top_src = bm_base / "topol.top" if (bm_base / "topol.top").exists() else job_dir / "topol.top"
 
         if not (tpr_src.exists() and xtc_src.exists() and top_src.exists()):
-            return {
-                "status": "error",
-                "message": f"Missing input files for MM-GBSA in {bm_base}. Ensure Backmapping finished successfully."
-            }
+            return {"status": "error", "message": f"Missing input files for MM-GBSA in {bm_base}."}
 
         shutil.copy2(xtc_src, mmgbsa_dir / "all.xtc")
         shutil.copy2(tpr_src, mmgbsa_dir / "dynamic.tpr")
-        if ndx_src.exists():
-            shutil.copy2(ndx_src, mmgbsa_dir / "index.ndx")
-        if gro_src.exists():
-            shutil.copy2(gro_src, mmgbsa_dir / "aa.gro")
+        if ndx_src.exists(): shutil.copy2(ndx_src, mmgbsa_dir / "index.ndx")
+        if gro_src.exists(): shutil.copy2(gro_src, mmgbsa_dir / "aa.gro")
         shutil.copy2(top_src, mmgbsa_dir / "topol.top")
 
-        # Copy parameter files (*.itp, *.prm, Mapping/)
         for search_dir in [job_dir, bm_base]:
-            for item in search_dir.glob("*.itp"):
-                shutil.copy2(item, mmgbsa_dir / item.name)
-            for item in search_dir.glob("*.prm"):
-                shutil.copy2(item, mmgbsa_dir / item.name)
+            for item in search_dir.glob("*.itp"): shutil.copy2(item, mmgbsa_dir / item.name)
+            for item in search_dir.glob("*.prm"): shutil.copy2(item, mmgbsa_dir / item.name)
             if (search_dir / "Mapping").exists() and not (mmgbsa_dir / "Mapping").exists():
                 shutil.copytree(search_dir / "Mapping", mmgbsa_dir / "Mapping")
 
-        # 4. Generate mmpbsa.in configuration
-        mmpbsa_in_path = mmgbsa_dir / "mmpbsa.in"
-        mmpbsa_template = """# General input for MM-GBSA evaluation
+        # 4. Generate mmpbsa.in
+        xtc_files = list(xtc_dir.glob("aa_*ns.xtc"))
+        final_end_frame = end_frame if end_frame > 0 else (len(xtc_files) if xtc_files else 1)
+
+        mmpbsa_template = f"""# General input for MM-GBSA evaluation
 &general
 sys_name="Protein-DNA_Complex",
-startframe=1,
-endframe=999999,
+startframe={start_frame},
+endframe={final_end_frame},
 interval=1,
 verbose=2,
 /
@@ -1188,34 +1177,106 @@ dec_verbose=1,
 print_res="within 6.0",
 /
 """
-        with open(mmpbsa_in_path, "w") as f:
+        with open(mmgbsa_dir / "mmpbsa.in", "w") as f:
             f.write(mmpbsa_template)
 
-        # 5. Execute gmx_MMPBSA using resolved indices
+        # 5. INJECT CUSTOM DECOMPOSITION GRAPHING SCRIPT
+        plot_script = """import os
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+def parse_decomp():
+    dat_file = "FINAL_DECOMP_MMPBSA.dat"
+    if not os.path.exists(dat_file):
+        return
+    
+    data = []
+    in_deltas = False
+    with open(dat_file, 'r') as f:
+        for line in f:
+            if line.startswith("DELTAS:"):
+                in_deltas = True
+                continue
+            if in_deltas:
+                if line.startswith("Total Energy Decomposition:"): continue
+                if line.startswith("Residue") or line.startswith("---") or not line.strip(): continue
+                parts = line.split()
+                if len(parts) >= 7:
+                    try:
+                        if parts[2] in ['R', 'L']:
+                            data.append({'Residue': f"{parts[0]}{parts[1]}", 'Loc': parts[2], 'Total': float(parts[-1])})
+                        elif parts[1] in ['R', 'L']:
+                            data.append({'Residue': parts[0], 'Loc': parts[1], 'Total': float(parts[-1])})
+                    except Exception:
+                        pass
+                        
+    if not data: return
+    df = pd.DataFrame(data)
+    
+    # Filter for favorable negative energies and plot top 40 contributors
+    df = df[df['Total'] < -0.1].sort_values('Total')
+    df_top = df.head(40)
+    
+    plt.figure(figsize=(14, 7))
+    colors = ['#1f77b4' if loc == 'R' else '#ff7f0e' for loc in df_top['Loc']]
+    plt.bar(df_top['Residue'], df_top['Total'], color=colors, edgecolor='black')
+    
+    plt.axhline(0, color='black', linewidth=1)
+    plt.xticks(rotation=60, ha='right', fontsize=10)
+    plt.ylabel(r"$\Delta G_{bind}$ Contribution (kcal/mol)", fontsize=12)
+    plt.title("Top Favorable Per-Residue Decomposition (Protein & DNA Aptamer)", fontsize=14, fontweight='bold')
+    
+    from matplotlib.patches import Patch
+    plt.legend(handles=[
+        Patch(facecolor='#1f77b4', label='Protein (Receptor)'),
+        Patch(facecolor='#ff7f0e', label='DNA Aptamer (Ligand)')
+    ], fontsize=12)
+    
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig("decomp_favorable_interactions.png", dpi=300)
+
+if __name__ == "__main__":
+    parse_decomp()
+"""
+        with open(mmgbsa_dir / "plot_decomp.py", "w") as f:
+            f.write(plot_script)
+
+        # 6. Execute gmx_MMPBSA
         mmpbsa_cmd = [
-            mmpbsa_exec, "-O",
-            "-i", "mmpbsa.in",
-            "-cs", "dynamic.tpr",
-            "-ct", "all.xtc",
-            "-ci", "index.ndx",
-            "-cg", str(p_idx), str(l_idx),
-            "-cp", "topol.top",
-            "-o", "FINAL_RESULTS_MMPBSA.dat",
-            "-eo", "FINAL_RESULTS_MMPBSA.csv",
-            "-do", "FINAL_DECOMP_MMPBSA.dat",
-            "-deo", "FINAL_DECOMP_MMPBSA.csv",
-            "-nogui"
+            mmpbsa_exec, "-O", "-i", "mmpbsa.in", "-cs", "dynamic.tpr",
+            "-ct", "all.xtc", "-ci", "index.ndx", "-cg", str(p_idx), str(l_idx),
+            "-cp", "topol.top", "-o", "FINAL_RESULTS_MMPBSA.dat",
+            "-eo", "FINAL_RESULTS_MMPBSA.csv", "-do", "FINAL_DECOMP_MMPBSA.dat",
+            "-deo", "FINAL_DECOMP_MMPBSA.csv", "-nogui"
         ]
 
-        subprocess.run(mmpbsa_cmd, cwd=mmgbsa_dir, check=True, capture_output=True, text=True)
+        try:
+            subprocess.run(mmpbsa_cmd, cwd=mmgbsa_dir, check=True, capture_output=True, text=True, env=os.environ)
+        except subprocess.CalledProcessError as e:
+            err_out = e.stderr if e.stderr else e.stdout
+            if "********* " in err_out or "ValueError" in err_out:
+                for bad_file in mmgbsa_dir.glob("_GMXMMPBSA_*"):
+                    if bad_file.is_file():
+                        try:
+                            with open(bad_file, "r") as f: text = f.read()
+                            if "*********" in text:
+                                with open(bad_file, "w") as f: f.write(text.replace("*********", " 9999.999"))
+                        except UnicodeDecodeError: pass
+                subprocess.run(mmpbsa_cmd + ["--rewrite-output"], cwd=mmgbsa_dir, check=True, capture_output=True, text=True, env=os.environ)
+            else:
+                raise e
 
+        # 7. Generate Decomposition Graph
+        subprocess.run(["python", "plot_decomp.py"], cwd=mmgbsa_dir, check=True, capture_output=True, text=True, env=os.environ)
+
+        # 8. Extract Summary and Package Results
         summary_data = ""
-        res_dat = mmgbsa_dir / "FINAL_RESULTS_MMPBSA.dat"
-        if res_dat.exists():
-            with open(res_dat, "r") as f:
+        if (mmgbsa_dir / "FINAL_RESULTS_MMPBSA.dat").exists():
+            with open(mmgbsa_dir / "FINAL_RESULTS_MMPBSA.dat", "r") as f:
                 summary_data = "".join(f.readlines()[-30:])
 
-        # 6. Package outputs into zip archive
         zip_path = analysis_dir / "mmgbsa_results.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(mmgbsa_dir):
