@@ -666,34 +666,60 @@ with tab9:
         st.session_state.job_id = job_id_mm
         c1, c2 = st.columns(2)
         with c1:
-            prot_idx = st.number_input("Protein Group Index", value=1, step=1, key="prot_idx_in")
+            prot_idx = st.number_input("Protein Group Index (from index.ndx)", value=1, step=1, key="prot_idx_in")
         with c2:
-            na_idx = st.number_input("DNA/RNA Aptamer Index", value=12, step=1, key="na_idx_in")
+            na_idx = st.number_input("DNA/RNA Aptamer Group Index (from index.ndx)", value=12, step=1, key="na_idx_in")
 
         if st.button("Execute MM-GBSA Calculation"):
             st.session_state.mmgbsa_zip_bytes = None
             st.session_state.mmgbsa_summary = ""
-            with st.spinner("Computing binding free energies via gmx_MMPBSA..."):
-                payload = {"job_id": job_id_mm, "protein_idx": prot_idx, "ligand_idx": na_idx}
+            with st.spinner("Computing binding free energies via gmx_MMPBSA on Colab..."):
+                payload = {
+                    "job_id": job_id_mm,
+                    "ligand_name": "DNA",
+                    "protein_idx": int(prot_idx),
+                    "ligand_idx": int(na_idx)
+                }
                 res = requests.post(f"{API_URL}/analysis/mmpbsa", json=payload)
                 if res.status_code == 200:
                     task_id = res.json()["task_id"]
+                    status_ph = st.empty()
                     while True:
                         s_res = requests.get(f"{API_URL}/status/{task_id}").json()
-                        if s_res["status"] == "SUCCESS":
-                            st.session_state.mmgbsa_summary = s_res["result"].get("summary_data", "")
-                            dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
-                            st.session_state.mmgbsa_zip_bytes = dl.content
-                            time.sleep(1)
-                            st.rerun()
+                        st_val = s_res["status"]
+                        if st_val == "SUCCESS":
+                            t_res = s_res.get("result", {})
+                            if isinstance(t_res, dict) and t_res.get("status") == "success":
+                                dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
+                                
+                                # Verify valid ZIP magic bytes ('PK\x03\x04')
+                                if dl.status_code == 200 and dl.content.startswith(b"PK"):
+                                    st.session_state.mmgbsa_zip_bytes = dl.content
+                                    st.session_state.mmgbsa_summary = t_res.get("summary_data", "")
+                                    status_ph.success("✅ MM-GBSA Calculation Complete!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    status_ph.error("❌ The server returned an invalid file. Check Colab logs.")
+                            else:
+                                err_msg = t_res.get("message", "MM-GBSA calculation failed.") if isinstance(t_res, dict) else str(t_res)
+                                status_ph.error(f"❌ MM-GBSA Error: {err_msg}")
                             break
-                        time.sleep(3)
+                        elif st_val == "FAILED":
+                            status_ph.error("❌ Celery Task Failed on Colab.")
+                            break
+                        else:
+                            status_ph.info(f"⏳ Status: {st_val} (Evaluating enthalpy & solvation free energies...)")
+                            time.sleep(3)
+                else:
+                    st.error(f"API Error {res.status_code}: {res.text}")
 
     if st.session_state.get("mmgbsa_summary"):
-        st.subheader("Delta Energy Summary (Complex - Receptor - Aptamer)")
+        st.subheader("📊 Binding Free Energy Summary ($\Delta G_{\\text{bind}}$)")
         st.code(st.session_state.mmgbsa_summary, language="text")
 
     if st.session_state.get("mmgbsa_zip_bytes"):
+        st.markdown("---")
         st.download_button(
             label="⬇️ Download MM-GBSA Results (.zip)",
             data=st.session_state.mmgbsa_zip_bytes,
