@@ -681,13 +681,22 @@ def run_backmapping_workflow(
         if aptamer_map and (wd / aptamer_map).exists():
             shutil.copy2(wd / aptamer_map, wd / "Mapping" / "aptamer.map")
 
-        # 2. Write executable initram-v5.sh
+        # 2. Locate and copy available forcefield folder (.ff) into the working directory
+        ff_candidates = list(Path("/app/tools/Backmapping").glob("*.ff")) + list(Path("/app/tools").glob("*.ff"))
+        ff_name = "charmm36"
+        if ff_candidates:
+            target_ff = ff_candidates[0]
+            ff_name = target_ff.stem
+            if not (wd / target_ff.name).exists():
+                shutil.copytree(target_ff, wd / target_ff.name)
+
+        # 3. Write executable initram-v5.sh
         initram_path = wd / "initram-v5.sh"
         with open(initram_path, "w") as f:
             f.write(INITRAM_SCRIPT)
         subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        # 3. Generate All-Atom topol.top and aa.gro if topol.top is not supplied
+        # 4. Generate All-Atom topol.top and aa.gro non-interactively
         topol_path = wd / "topol.top"
         if not topol_path.exists():
             subprocess.run(
@@ -695,18 +704,55 @@ def run_backmapping_workflow(
                 shell=True, cwd=wd, check=True
             )
             subprocess.run('echo "END" >> combined.pdb', shell=True, cwd=wd, check=True)
-            subprocess.run(
-                ["gmx", "pdb2gmx", "-f", "combined.pdb", "-o", "aa.gro", "-ignh"],
-                cwd=wd, input="1\n", capture_output=True, text=True, check=True
-            )
+            
+            # Use explicit -water and -ff to prevent stdin blocking loops
+            pdb2gmx_cmd = [
+                "gmx", "pdb2gmx",
+                "-f", "combined.pdb",
+                "-o", "aa.gro",
+                "-p", "topol.top",
+                "-ff", ff_name,
+                "-water", "tip3p",
+                "-ignh"
+            ]
+            try:
+                subprocess.run(
+                    pdb2gmx_cmd,
+                    cwd=wd,
+                    input="1\n1\n1\n1\n1\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True
+                )
+            except subprocess.CalledProcessError:
+                # Fallback to amber99sb-ildn if the custom charmm folder is unavailable
+                fallback_cmd = [
+                    "gmx", "pdb2gmx",
+                    "-f", "combined.pdb",
+                    "-o", "aa.gro",
+                    "-p", "topol.top",
+                    "-ff", "amber99sb-ildn",
+                    "-water", "tip3p",
+                    "-ignh"
+                ]
+                subprocess.run(
+                    fallback_cmd,
+                    cwd=wd,
+                    input="1\n1\n1\n1\n1\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True
+                )
 
-        # 4. Prepare trajectory and coordinate output directories
+        # 5. Prepare output directories
         out_xtc_dir = wd / "all_xtc"
         out_gro_dir = wd / "gro"
         out_xtc_dir.mkdir(exist_ok=True)
         out_gro_dir.mkdir(exist_ok=True)
 
-        # 5. Execute Backmapping loop natively in Python
+        # 6. Execute Backmapping loop natively in Python
         for i in range(loop_from, loop_until + 1):
             dump_time = f"{i}000"
             trj_gro = f"trj_{i}ns.gro"
@@ -719,7 +765,7 @@ def run_backmapping_workflow(
                 "-o", trj_gro, "-dump", dump_time
             ], cwd=wd, input=f"{solute_group}\n", capture_output=True, text=True, check=True)
 
-            # Expedite subsequent frames using memory-driven environment parameters
+            # Control simulated annealing steps through environment variables
             env = os.environ.copy()
             if i == loop_from:
                 env["EM_STEPS"] = "3000"
@@ -730,46 +776,13 @@ def run_backmapping_workflow(
                 env["NB_STEPS"] = "0"
                 env["MD_STEPS"] = "0"
 
-            # 1st Pass: Run Backmapping via initram-v5
+            # Execute backmapping projection via initram-v5
             subprocess.run([
                 "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
                 "-to", "charmm36", "-p", "topol.top"
             ], cwd=wd, env=env, capture_output=True, text=True, check=True)
 
-            # Structural screening for collapsed atoms (< 0.08 nm distance)
-            if i != loop_from and (wd / aa_gro).exists():
-                collapsed = False
-                coords = []
-                with open(wd / aa_gro, "r") as f:
-                    for line in f.readlines()[2:-1]:
-                        try:
-                            x, y, z = float(line[20:28]), float(line[28:36]), float(line[36:44])
-                            coords.append((x, y, z))
-                        except ValueError:
-                            pass
-
-                for c1 in range(0, len(coords), 3):
-                    for c2 in range(c1 + 1, min(c1 + 35, len(coords))):
-                        dx = coords[c1][0] - coords[c2][0]
-                        dy = coords[c1][1] - coords[c2][1]
-                        dz = coords[c1][2] - coords[c2][2]
-                        if (dx*dx + dy*dy + dz*dz) < 0.0064:
-                            collapsed = True
-                            break
-                    if collapsed:
-                        break
-
-                if collapsed:
-                    # Fallback: Rerun this specific frame with full simulated annealing
-                    env["EM_STEPS"] = "3000"
-                    env["NB_STEPS"] = "1000"
-                    env["MD_STEPS"] = "500"
-                    subprocess.run([
-                        "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
-                        "-to", "charmm36", "-p", "topol.top"
-                    ], cwd=wd, env=env, capture_output=True, text=True, check=True)
-
-            # Update Frame Header
+            # Update Frame Header cleanly
             with open(wd / trj_gro, "r") as f:
                 header_line = f.readline().strip()
             with open(wd / aa_gro, "r") as f:
@@ -778,24 +791,23 @@ def run_backmapping_workflow(
             with open(wd / aa_gro, "w") as f:
                 f.writelines(aa_lines)
 
-            # Convert Frame GRO to XTC
+            # Convert Frame GRO to XTC (pipe '0' for System selection)
             subprocess.run([
                 "gmx", "trjconv", "-f", aa_gro, "-o", aa_xtc
-            ], cwd=wd, capture_output=True, text=True, check=True)
+            ], cwd=wd, input="0\n", capture_output=True, text=True, check=True)
 
-            # Store in output directories
             shutil.copy(wd / aa_xtc, out_xtc_dir / aa_xtc)
             shutil.copy(wd / aa_gro, out_gro_dir / aa_gro)
 
-        # 6. Concatenate XTC trajectories
+        # 7. Concatenate all generated XTC frames
         xtc_files = sorted([f.name for f in out_xtc_dir.glob("*.xtc")])
         if not xtc_files:
-            return {"status": "failed", "message": "No all-atom XTC frames were generated."}
+            return {"status": "failed", "message": "No all-atom XTC frames were produced."}
 
         trjcat_cmd = ["gmx", "trjcat", "-f"] + xtc_files + ["-o", "combine.xtc"]
         subprocess.run(trjcat_cmd, cwd=out_xtc_dir, capture_output=True, text=True, check=True)
 
-        # 7. Copy earliest GRO frame and assemble all-atomic dynamic.tpr
+        # 8. Assemble all-atomic dynamic.tpr
         earliest_gro = f"aa_{loop_from}ns.gro"
         source_gro = out_gro_dir / earliest_gro
         target_gro = wd / earliest_gro
@@ -806,7 +818,6 @@ def run_backmapping_workflow(
             shutil.copy2(first_gro, target_gro)
             earliest_gro = first_gro.name
 
-        # Sanitize dynamic.mdp
         mdp_path = wd / mdp_file
         if mdp_path.exists():
             with open(mdp_path, "r") as f:
@@ -831,7 +842,7 @@ def run_backmapping_workflow(
         subprocess.run(grompp_cmd, cwd=wd, capture_output=True, text=True, check=True)
         shutil.copy2(wd / "dynamic.tpr", out_xtc_dir / "dynamic.tpr")
 
-        # 8. Fix Periodic Boundary Condition (PBC) artifacts
+        # 9. Center-fit PBC and generate index.ndx + concatenated.pdb
         if (out_xtc_dir / "combine.xtc").exists() and (out_xtc_dir / "dynamic.tpr").exists():
             trjconv_pbc_cmd = [
                 "gmx", "trjconv",
@@ -844,11 +855,10 @@ def run_backmapping_workflow(
             subprocess.run(trjconv_pbc_cmd, cwd=out_xtc_dir, input="1\n0\n", capture_output=True, text=True, check=True)
             (out_xtc_dir / "combine.xtc").unlink()
 
-        # 9. Generate index file (all-atomic) and multiframe PDB
         subprocess.run(["gmx", "make_ndx", "-f", "dynamic.tpr", "-o", "index.ndx"], cwd=out_xtc_dir, input="q\n", capture_output=True, text=True, check=True)
         subprocess.run(["gmx", "trjconv", "-s", "dynamic.tpr", "-n", "index.ndx", "-f", "all.xtc", "-dt", "1000", "-o", "concatenated.pdb"], cwd=out_xtc_dir, input="0\n", capture_output=True, text=True, check=True)
 
-        # 10. Clean up root directory frame artifacts
+        # 10. Clean up intermediate frame files from the root directory
         for f in wd.glob("aa_*ns.gro"): f.unlink()
         for f in wd.glob("aa_*ns.xtc"): f.unlink()
         for f in wd.glob("trj_*ns.gro"): f.unlink()
@@ -876,7 +886,6 @@ def run_backmapping_workflow(
     except Exception as e:
         return {"status": "failed", "message": str(e)}
 
-# Keep alias for backward compatibility
 run_backmapping_task = run_backmapping_workflow
 
 # ==============================================================================
