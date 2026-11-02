@@ -1094,7 +1094,18 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
     except Exception:
         pass
 
-    # 1. Ensure PATH includes Conda/Mamba directories
+    # 1. Enforce distinct indices for Receptor (Protein=1) and Ligand (DNA=12)
+    try:
+        p_idx = int(protein_idx)
+        l_idx = int(ligand_idx)
+    except Exception:
+        p_idx, l_idx = 1, 12
+
+    if p_idx == l_idx:
+        p_idx = 1
+        l_idx = 12
+
+    # 2. Ensure PATH includes Conda/Mamba directories
     extra_paths = ["/root/micromamba/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), "/opt/conda/bin"]
     os.environ["PATH"] = ":".join(extra_paths) + ":" + os.environ.get("PATH", "")
 
@@ -1117,7 +1128,7 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
     mmgbsa_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 2. Check both directory possibilities for backmapping trajectories
+        # 3. Locate trajectory and topology files
         bm_base = job_dir / "Backmapping" if (job_dir / "Backmapping").exists() else job_dir
         xtc_dir = bm_base / "all_xtc" if (bm_base / "all_xtc").exists() else job_dir / "all_xtc"
 
@@ -1141,7 +1152,7 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
             shutil.copy2(gro_src, mmgbsa_dir / "aa.gro")
         shutil.copy2(top_src, mmgbsa_dir / "topol.top")
 
-        # Copy all topology include files (*.itp, *.prm, Mapping/)
+        # Copy parameter files (*.itp, *.prm, Mapping/)
         for search_dir in [job_dir, bm_base]:
             for item in search_dir.glob("*.itp"):
                 shutil.copy2(item, mmgbsa_dir / item.name)
@@ -1150,7 +1161,7 @@ def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1,
             if (search_dir / "Mapping").exists() and not (mmgbsa_dir / "Mapping").exists():
                 shutil.copytree(search_dir / "Mapping", mmgbsa_dir / "Mapping")
 
-        # 3. Create or download input files
+        # 4. Generate mmpbsa.in configuration
         mmpbsa_in_path = mmgbsa_dir / "mmpbsa.in"
         mmpbsa_template = """# General input for MM-GBSA evaluation
 &general
@@ -1173,14 +1184,14 @@ print_res="within 6.0",
         with open(mmpbsa_in_path, "w") as f:
             f.write(mmpbsa_template)
 
-        # 4. Execute gmx_MMPBSA non-interactively
+        # 5. Execute gmx_MMPBSA using resolved indices
         mmpbsa_cmd = [
             mmpbsa_exec, "-O",
             "-i", "mmpbsa.in",
             "-cs", "dynamic.tpr",
             "-ct", "all.xtc",
             "-ci", "index.ndx",
-            "-cg", str(protein_idx), str(ligand_idx),
+            "-cg", str(p_idx), str(l_idx),
             "-cp", "topol.top",
             "-o", "FINAL_RESULTS_MMPBSA.dat",
             "-eo", "FINAL_RESULTS_MMPBSA.csv",
@@ -1197,7 +1208,7 @@ print_res="within 6.0",
             with open(res_dat, "r") as f:
                 summary_data = "".join(f.readlines()[-30:])
 
-        # 5. Package results into zip
+        # 6. Package outputs into zip archive
         zip_path = analysis_dir / "mmgbsa_results.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(mmgbsa_dir):
