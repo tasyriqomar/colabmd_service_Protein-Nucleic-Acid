@@ -10,7 +10,9 @@ import py3Dmol
 import streamlit.components.v1 as components
 from Bio.PDB import PDBParser
 
-# 1. PAGE SETUP
+# ==========================================
+# 1. PAGE SETUP (Sets browser tab metadata)
+# ==========================================
 st.set_page_config(page_title="ColabMD - Protein-Nucleic Acid", page_icon="🧬", layout="wide")
 
 # ==========================================
@@ -81,7 +83,9 @@ with st.sidebar:
         st.session_state.current_user = None
         st.rerun()
 
-# State persistence
+# ==========================================
+# 4. STATE PERSISTENCE
+# ==========================================
 state_keys = [
     "job_id", "aptamer_bytes", "docking_zip_bytes", "docking_scores_df", 
     "cg_prep_zip_bytes", "cg_gro_preview", "dna_top_preview", "sys_top_preview",
@@ -93,7 +97,14 @@ for k in state_keys:
         st.session_state[k] = "" if "summary" in k or "job_id" in k or "preview" in k else None
 
 # ==========================================
-# 4. PIPELINE TABS (1 - 10)
+# 5. VISIBLE FRONT PAGE HEADER
+# ==========================================
+st.title("🧬 ColabMD - Protein–Nucleic Acid Dynamics")
+st.markdown("Automated macromolecular docking, coarse-grained dynamics, backmapping, interaction profiling (PLIP), MM-GBSA free energy calculations, and PCA-FEL analysis.")
+st.markdown("---")
+
+# ==========================================
+# 6. PIPELINE TABS (1 - 10)
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "1. Aptamer Prep",
