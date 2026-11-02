@@ -52,11 +52,30 @@ if not st.session_state.authenticated:
 # 3. SIDEBAR CONFIGURATION
 # ==========================================
 with st.sidebar:
+    # Display the ColabMD-Edu Mascot Image
+    st.image("https://raw.githubusercontent.com/tasyriqomar/ColabMD-Edu/main/Mascot_ColabMD-Edu.png", use_container_width=True)
+    
+    # Authentication Status
     st.success(f"👤 Logged in as: **{st.session_state.current_user}**")
+    st.markdown("---")
+    
+    # Colab Worker Link
+    st.header("🚀 Worker Environment")
+    st.markdown("Launch the background worker before running tasks:")
+    st.link_button("🔗 Open Google Colab Worker", "https://colab.research.google.com/drive/1pb4-oy02iPr5ysDhtq5HF2NLFaQH4R_-#scrollTo=hZFS58FttXc-", use_container_width=True)
+    st.markdown("---")
+    
+    # Backend URL Configuration
     st.header("⚙️ Backend Connection")
     API_URL = st.text_input("Colab Ngrok URL", value=st.session_state.get("api_url", "https://YOUR-NGROK-URL.ngrok-free.app/api/v1"))
     st.session_state.api_url = API_URL
+    
+    if not API_URL.endswith("/api/v1"):
+        st.warning("⚠️ URL should end with /api/v1")
+        
     st.markdown("---")
+    
+    # Logout
     if st.button("Logout", use_container_width=True):
         st.session_state.authenticated = False
         st.session_state.current_user = None
