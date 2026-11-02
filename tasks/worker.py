@@ -976,11 +976,14 @@ def run_plip_analysis_task(job_id: str):
         subprocess.run(["bash", "plip.sh"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
         subprocess.run([sys.executable, "convert_xml_to_json.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
 
+        # FAILSAFE: Ensure PLIP actually found interactions and generated the JSON
         if (analysis_dir / "split_pdbs" / "extracted_data.json").exists():
             shutil.copy(analysis_dir / "split_pdbs" / "extracted_data.json", analysis_dir / "extracted_data.json")
+        else:
+            raise Exception("PLIP did not generate any XML interaction data. Ensure 'plip' is installed in Colab via mamba, or verify the complex contains valid interface contacts.")
 
         subprocess.run([sys.executable, "process_json.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
-
+        
         bond_csv = analysis_dir / "bond_csv_files"
         split_bond_csv = analysis_dir / "split_pdbs" / "bond_csv_files"
         if bond_csv.exists():
