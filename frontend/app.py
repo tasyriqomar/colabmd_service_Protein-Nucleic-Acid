@@ -738,6 +738,15 @@ with tab9:
             mime="application/zip",
             key="mmgbsa_download"
         )
+        
+        # Display the custom Protein-DNA decomposition graph
+        try:
+            with zipfile.ZipFile(io.BytesIO(st.session_state.mmgbsa_zip_bytes)) as z:
+                if "decomp_favorable_interactions.png" in z.namelist():
+                    st.subheader("🔬 Protein-DNA Favorable Interactions (Decomposition)")
+                    st.image(z.read("decomp_favorable_interactions.png"), use_container_width=True)
+        except Exception as e:
+            pass
 
 # ------------------------------------------
 # TAB 10: PCA AND FEL (NO PYMOL)
