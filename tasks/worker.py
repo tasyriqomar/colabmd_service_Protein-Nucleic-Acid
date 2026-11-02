@@ -1085,51 +1085,138 @@ def run_plip_analysis_task(job_id: str):
         return {"status": "error", "message": str(e)}
 
 # ==============================================================================
-# TAB 9: MM-GBSA (PROTEIN - NUCLEIC ACID)
+# TAB 9: MM-GBSA BINDING ENERGY (PROTEIN - NUCLEIC ACID)
 # ==============================================================================
 @celery_app.task
-def run_mmpbsa_task(job_id: str, protein_idx: int = 1, ligand_idx: int = 12, start_frame: int = 1, end_frame: int = 0):
-    extra_paths = ["/root/micromamba/bin", "/usr/local/bin"]
+def run_mmpbsa_task(job_id: str, ligand_name: str = "DNA", protein_idx: int = 1, ligand_idx: int = 12, start_frame: int = 1, end_frame: int = 0):
+    try:
+        os.chdir("/app")
+    except Exception:
+        pass
+
+    # 1. Ensure PATH includes Conda/Mamba directories
+    extra_paths = ["/root/micromamba/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), "/opt/conda/bin"]
     os.environ["PATH"] = ":".join(extra_paths) + ":" + os.environ.get("PATH", "")
-    mmpbsa_exec = shutil.which("gmx_MMPBSA") or "/root/micromamba/bin/gmx_MMPBSA"
+
+    mmpbsa_exec = shutil.which("gmx_MMPBSA")
+    if not mmpbsa_exec:
+        for candidate in ["/root/micromamba/bin/gmx_MMPBSA", "/usr/local/bin/gmx_MMPBSA", "/opt/conda/bin/gmx_MMPBSA"]:
+            if os.path.exists(candidate):
+                mmpbsa_exec = candidate
+                break
+
+    if not mmpbsa_exec:
+        return {
+            "status": "error",
+            "message": "gmx_MMPBSA executable not found in Colab PATH. Please run '!mamba install -c conda-forge ambertools mpi4py gmx_mmpbsa -y'."
+        }
 
     job_dir = Path(f"/app/shared_data/{job_id}")
-    mm_dir = job_dir / "analysis" / "MMGBSA"
-    mm_dir.mkdir(parents=True, exist_ok=True)
-    xtc_dir = job_dir / "Backmapping" / "all_xtc" if (job_dir / "Backmapping" / "all_xtc").exists() else job_dir / "all_xtc"
-    bm_dir = job_dir / "Backmapping"
+    analysis_dir = job_dir / "analysis"
+    mmgbsa_dir = analysis_dir / "MMGBSA"
+    mmgbsa_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        shutil.copy2(xtc_dir / "all.xtc", mm_dir / "all.xtc")
-        shutil.copy2(xtc_dir / "dynamic.tpr", mm_dir / "dynamic.tpr")
-        shutil.copy2(xtc_dir / "index.ndx", mm_dir / "index.ndx")
-        if (bm_dir / "topol.top").exists(): shutil.copy2(bm_dir / "topol.top", mm_dir / "topol.top")
-        if (Path("/app/tools/Analysis/mmpbsa.in")).exists(): shutil.copy2("/app/tools/Analysis/mmpbsa.in", mm_dir / "mmpbsa.in")
+        # 2. Check both directory possibilities for backmapping trajectories
+        bm_base = job_dir / "Backmapping" if (job_dir / "Backmapping").exists() else job_dir
+        xtc_dir = bm_base / "all_xtc" if (bm_base / "all_xtc").exists() else job_dir / "all_xtc"
 
-        cmd = [
-            mmpbsa_exec, "-O", "-i", "mmpbsa.in", "-cs", "dynamic.tpr",
-            "-ct", "all.xtc", "-ci", "index.ndx", "-cg", str(protein_idx), str(ligand_idx),
-            "-cp", "topol.top", "-o", "FINAL_RESULTS_MMPBSA.dat",
-            "-eo", "FINAL_RESULTS_MMPBSA.csv", "-do", "FINAL_DECOMP_MMPBSA.dat",
-            "-deo", "FINAL_DECOMP_MMPBSA.csv", "-nogui"
+        tpr_src = xtc_dir / "dynamic.tpr"
+        xtc_src = xtc_dir / "all.xtc"
+        ndx_src = xtc_dir / "index.ndx"
+        gro_src = bm_base / "aa.gro" if (bm_base / "aa.gro").exists() else job_dir / "aa.gro"
+        top_src = bm_base / "topol.top" if (bm_base / "topol.top").exists() else job_dir / "topol.top"
+
+        if not (tpr_src.exists() and xtc_src.exists() and top_src.exists()):
+            return {
+                "status": "error",
+                "message": f"Missing input files for MM-GBSA in {bm_base}. Ensure Backmapping finished successfully."
+            }
+
+        shutil.copy2(xtc_src, mmgbsa_dir / "all.xtc")
+        shutil.copy2(tpr_src, mmgbsa_dir / "dynamic.tpr")
+        if ndx_src.exists():
+            shutil.copy2(ndx_src, mmgbsa_dir / "index.ndx")
+        if gro_src.exists():
+            shutil.copy2(gro_src, mmgbsa_dir / "aa.gro")
+        shutil.copy2(top_src, mmgbsa_dir / "topol.top")
+
+        # Copy all topology include files (*.itp, *.prm, Mapping/)
+        for search_dir in [job_dir, bm_base]:
+            for item in search_dir.glob("*.itp"):
+                shutil.copy2(item, mmgbsa_dir / item.name)
+            for item in search_dir.glob("*.prm"):
+                shutil.copy2(item, mmgbsa_dir / item.name)
+            if (search_dir / "Mapping").exists() and not (mmgbsa_dir / "Mapping").exists():
+                shutil.copytree(search_dir / "Mapping", mmgbsa_dir / "Mapping")
+
+        # 3. Create or download input files
+        mmpbsa_in_path = mmgbsa_dir / "mmpbsa.in"
+        mmpbsa_template = """# General input for MM-GBSA evaluation
+&general
+sys_name="Protein-DNA_Complex",
+startframe=1,
+endframe=999999,
+interval=1,
+verbose=2,
+/
+&gb
+igb=5,
+saltcon=0.150,
+/
+&decomp
+idecomp=1,
+dec_verbose=1,
+print_res="within 6.0",
+/
+"""
+        with open(mmpbsa_in_path, "w") as f:
+            f.write(mmpbsa_template)
+
+        # 4. Execute gmx_MMPBSA non-interactively
+        mmpbsa_cmd = [
+            mmpbsa_exec, "-O",
+            "-i", "mmpbsa.in",
+            "-cs", "dynamic.tpr",
+            "-ct", "all.xtc",
+            "-ci", "index.ndx",
+            "-cg", str(protein_idx), str(ligand_idx),
+            "-cp", "topol.top",
+            "-o", "FINAL_RESULTS_MMPBSA.dat",
+            "-eo", "FINAL_RESULTS_MMPBSA.csv",
+            "-do", "FINAL_DECOMP_MMPBSA.dat",
+            "-deo", "FINAL_DECOMP_MMPBSA.csv",
+            "-nogui"
         ]
-        subprocess.run(cmd, cwd=mm_dir, check=True, capture_output=True, text=True, env=os.environ)
+
+        subprocess.run(mmpbsa_cmd, cwd=mmgbsa_dir, check=True, capture_output=True, text=True)
 
         summary_data = ""
-        res_dat = mm_dir / "FINAL_RESULTS_MMPBSA.dat"
+        res_dat = mmgbsa_dir / "FINAL_RESULTS_MMPBSA.dat"
         if res_dat.exists():
-            with open(res_dat, "r") as f: summary_data = "".join(f.readlines()[-20:])
+            with open(res_dat, "r") as f:
+                summary_data = "".join(f.readlines()[-30:])
 
-        zip_path = job_dir / "analysis" / "mmgbsa_results.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
-            for root, _, files in os.walk(mm_dir):
+        # 5. Package results into zip
+        zip_path = analysis_dir / "mmgbsa_results.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(mmgbsa_dir):
                 for file in files:
                     fp = os.path.join(root, file)
-                    z.write(fp, arcname=os.path.relpath(fp, mm_dir))
+                    zipf.write(fp, arcname=os.path.relpath(fp, mmgbsa_dir))
 
-        return {"status": "success", "result_file": str(zip_path), "summary_data": summary_data}
+        return {
+            "status": "success",
+            "message": "MM-GBSA analysis complete.",
+            "result_file": str(zip_path),
+            "summary_data": summary_data
+        }
+
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if e.stderr else e.stdout
+        return {"status": "error", "message": f"gmx_MMPBSA Error: {err}"}
     except Exception as e:
-        return {"status": "error", "message": f"MM-GBSA Error: {str(e)}"}
+        return {"status": "error", "message": str(e)}
 
 # ==============================================================================
 # TAB 10: PCA & FEL (NO PYMOL)
