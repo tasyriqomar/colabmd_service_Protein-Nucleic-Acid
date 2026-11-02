@@ -599,15 +599,38 @@ with tab8:
                 res = requests.post(f"{API_URL}/analysis/plip", json={"job_id": job_id_plip})
                 if res.status_code == 200:
                     task_id = res.json()["task_id"]
+                    status_ph = st.empty()
                     while True:
                         s_res = requests.get(f"{API_URL}/status/{task_id}").json()
-                        if s_res["status"] == "SUCCESS":
-                            dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
-                            st.session_state.plip_zip_bytes = dl.content
-                            time.sleep(1)
-                            st.rerun()
+                        st_val = s_res["status"]
+                        
+                        if st_val == "SUCCESS":
+                            t_res = s_res.get("result", {})
+                            
+                            # Safely check if the backend Python function succeeded before downloading
+                            if isinstance(t_res, dict) and t_res.get("status") in ["success", "SUCCESS"]:
+                                dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
+                                
+                                # Verify it's not a JSON error response
+                                if dl.status_code == 200 and not dl.content.startswith(b'{"error"'):
+                                    st.session_state.plip_zip_bytes = dl.content
+                                    status_ph.success("✅ PLIP Analysis Complete!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    status_ph.error("❌ Download failed or file was missing on server.")
+                            else:
+                                err_m = t_res.get("message", "Task failed silently.") if isinstance(t_res, dict) else str(t_res)
+                                status_ph.error(f"❌ PLIP Error: {err_m}")
                             break
-                        time.sleep(3)
+                        elif st_val == "FAILED":
+                            status_ph.error("❌ Celery Task Failed on Colab.")
+                            break
+                        else:
+                            status_ph.info(f"⏳ Status: {st_val} (Running PLIP Analysis...)")
+                            time.sleep(3)
+                else:
+                    st.error(f"API Error {res.status_code}")
 
     if st.session_state.get("plip_zip_bytes"):
         st.markdown("---")
@@ -627,7 +650,7 @@ with tab8:
                         with cols[i % 2]:
                             st.image(z.read(p), caption=os.path.basename(p), use_container_width=True)
         except Exception as e:
-            st.warning(f"Error previewing interaction plots: {e}")
+            st.error(f"Error previewing interaction plots: {e}")
 
 # ------------------------------------------
 # TAB 9: MM-GBSA BINDING ENERGY
