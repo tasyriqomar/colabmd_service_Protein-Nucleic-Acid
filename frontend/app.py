@@ -103,6 +103,8 @@ with tab1:
     """)
     st.markdown("---")
     
+    st.markdown("Don't have a protein structure? Generate one using [AlphaFold2.ipynb](https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2.ipynb#scrollTo=G4yBrceuFbf3)")
+    
     aptamer_file = st.file_uploader("Upload Aptamer Structure (PDB)", type=["pdb"], key="apt_upload")
     convert_rna = st.checkbox("Convert RNA (Uracil) to DNA (Thymine)", value=True)
     
