@@ -965,35 +965,110 @@ def run_plip_analysis_task(job_id: str):
         return {"status": "error", "message": f"Missing trajectories in {xtc_dir}"}
 
     try:
-        subprocess.run(["gmx", "trjconv", "-s", str(tpr), "-n", str(ndx), "-f", str(xtc), "-dt", "1000", "-o", "concatenated.pdb"], input="0\n", cwd=work_dir, check=True, text=True, capture_output=True, env=env)
+        # Step 1: Convert trajectory frames to concatenated PDB
+        subprocess.run(
+            ["gmx", "trjconv", "-s", str(tpr), "-n", str(ndx), "-f", str(xtc), "-dt", "1000", "-o", "concatenated.pdb"],
+            input="0\n", cwd=work_dir, check=True, text=True, capture_output=True, env=env
+        )
 
         analysis_dir = work_dir / "Analysis"
         if analysis_dir.exists(): shutil.rmtree(analysis_dir)
         shutil.copytree("/app/tools/Analysis", analysis_dir)
         shutil.move(work_dir / "concatenated.pdb", analysis_dir / "concatenated.pdb")
 
+        split_dir = analysis_dir / "split_pdbs"
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 2: Dynamic Path Patching (Replace hardcoded Google Drive paths)
+        colab_prefixes = [
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-NA/Analysis/split_pdbs",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-Protein/NA/split_pdbs",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-NA/Analysis",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-NA",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-Protein/NA",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-Ligand/Analysis",
+            "/content/drive/MyDrive/ColabMD-Edu_Protein-Ligand",
+        ]
+
+        for script_file in list(analysis_dir.glob("*.py")) + list(analysis_dir.glob("*.sh")):
+            with open(script_file, "r") as f:
+                content = f.read()
+
+            for old_p in colab_prefixes:
+                if "split_pdbs" in old_p:
+                    content = content.replace(old_p, str(split_dir))
+                else:
+                    content = content.replace(old_p, str(analysis_dir))
+
+            # Remove PyMOL visual rendering flags so PLIP runs headlessly
+            if script_file.name == "plip.sh":
+                content = content.replace("--pics", "").replace("--pymol", "").replace(" -p", "").replace(" -y", "")
+
+            if script_file.name == "timeline_interaction_color.py":
+                content = content.replace("plt.tight_layout()", "plt.xticks(rotation=90, fontsize=7)\n    plt.tight_layout()")
+
+            with open(script_file, "w") as f:
+                f.write(content)
+
+        # Step 3: Split the concatenated.pdb into split_pdbs/
         subprocess.run([sys.executable, "split_pdb.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
-        subprocess.run(["bash", "plip.sh"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
-        subprocess.run([sys.executable, "convert_xml_to_json.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
 
-        # FAILSAFE: Ensure PLIP actually found interactions and generated the JSON
-        if (analysis_dir / "split_pdbs" / "extracted_data.json").exists():
-            shutil.copy(analysis_dir / "split_pdbs" / "extracted_data.json", analysis_dir / "extracted_data.json")
+        # Step 4: Copy scripts into split_pdbs (Matches Google Colab Notebook Cell 147)
+        for sf in list(analysis_dir.glob("*.py")) + list(analysis_dir.glob("*.sh")):
+            shutil.copy2(sf, split_dir / sf.name)
+
+        # Step 5: Run PLIP inside split_pdbs where the split frame PDBs live
+        if (split_dir / "plip.sh").exists():
+            subprocess.run(["bash", "plip.sh"], cwd=split_dir, check=True, capture_output=True, text=True, env=env)
+        elif (analysis_dir / "plip.sh").exists():
+            subprocess.run(["bash", "plip.sh"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
+
+        # Step 6: Convert XML to JSON in split_pdbs
+        if (split_dir / "convert_xml_to_json.py").exists():
+            subprocess.run([sys.executable, "convert_xml_to_json.py"], cwd=split_dir, check=True, capture_output=True, text=True, env=env)
         else:
-            raise Exception("PLIP did not generate any XML interaction data. Ensure 'plip' is installed in Colab via mamba, or verify the complex contains valid interface contacts.")
+            subprocess.run([sys.executable, "convert_xml_to_json.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
 
+        # Sync extracted_data.json between split_pdbs and analysis_dir
+        if (split_dir / "extracted_data.json").exists():
+            shutil.copy(split_dir / "extracted_data.json", analysis_dir / "extracted_data.json")
+        elif (analysis_dir / "extracted_data.json").exists():
+            shutil.copy(analysis_dir / "extracted_data.json", split_dir / "extracted_data.json")
+        else:
+            raise Exception("PLIP completed, but no interaction XML files were produced. Verify PLIP binary is in PATH.")
+
+        # Step 7: Process JSON into CSV folders
         subprocess.run([sys.executable, "process_json.py"], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
-        
+
+        # Sync bond_csv_files across both directories
         bond_csv = analysis_dir / "bond_csv_files"
-        split_bond_csv = analysis_dir / "split_pdbs" / "bond_csv_files"
+        split_bond_csv = split_dir / "bond_csv_files"
         if bond_csv.exists():
             if split_bond_csv.exists(): shutil.rmtree(split_bond_csv)
             shutil.copytree(bond_csv, split_bond_csv)
+        elif split_bond_csv.exists():
+            if bond_csv.exists(): shutil.rmtree(bond_csv)
+            shutil.copytree(split_bond_csv, bond_csv)
 
-        for script in ["percentage_interactions.py", "type_interactions_color.py", "residue_interactions_color_csv_a.py", "timeline_interaction_color.py"]:
-            if (analysis_dir / script).exists():
+        # Step 8: Generate interaction figures and summary plots
+        plot_scripts = [
+            "percentage_interactions.py",
+            "type_interactions_color.py",
+            "residue_interactions_color_csv_a.py",
+            "timeline_interaction_color.py"
+        ]
+        for script in plot_scripts:
+            if (split_dir / script).exists():
+                subprocess.run([sys.executable, script], cwd=split_dir, check=True, capture_output=True, text=True, env=env)
+            elif (analysis_dir / script).exists():
                 subprocess.run([sys.executable, script], cwd=analysis_dir, check=True, capture_output=True, text=True, env=env)
 
+        # Copy all generated plot images and CSV tables into analysis_dir root for zipping
+        for ext in ["*.png", "*.jpg", "*.csv"]:
+            for f in split_dir.glob(ext):
+                shutil.copy2(f, analysis_dir / f.name)
+
+        # Step 9: Package final output archive
         zip_path = work_dir / "plip_results.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
             for root, _, files in os.walk(analysis_dir):
@@ -1002,9 +1077,10 @@ def run_plip_analysis_task(job_id: str):
                     z.write(fp, arcname=os.path.relpath(fp, analysis_dir))
 
         return {"status": "success", "result_file": str(zip_path)}
+
     except subprocess.CalledProcessError as e:
         err = e.stderr if e.stderr else e.stdout
-        return {"status": "error", "message": f"PLIP Error: {err}"}
+        return {"status": "error", "message": f"PLIP Command Failed: {err}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
