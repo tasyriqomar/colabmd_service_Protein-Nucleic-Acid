@@ -163,7 +163,7 @@ with tab2:
     6. **Centering & Fitting:** Trajectory fitting (`gmx trjconv` with `-fit rot+trans`) to generate `aptamer_relaxed.pdb`.
     """)
     
-    colab_url_aamd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/CloudMD_Edu_Colab_Protein_NucleicAcid.ipynb#scrollTo=ApM1ScF4UqB6"
+    colab_url_aamd = "https://colab.research.google.com/drive/15qR5pS9CF9o1QznKxeK_k3OqA_7kXYqB#scrollTo=5MzAJbc-UmWv"
     st.markdown(f'<a href="{colab_url_aamd}" target="_blank"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height:38px;"/></a>', unsafe_allow_html=True)
     st.caption("Once production finishes, download `aptamer_relaxed.pdb` to proceed to docking or coarse-graining.")
 
