@@ -2,11 +2,13 @@ from celery import Celery
 import subprocess
 from pathlib import Path
 import os
+import io
 import zipfile
 import shutil
 import glob
 import sys
 import gzip
+import numpy as np
 import pandas as pd
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -58,20 +60,192 @@ def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: boo
 run_aptamer_processing_task = run_aptamer_task
 
 # ==============================================================================
-# TAB 3: HADDOCK3 DOCKING & CONTACT ANALYSIS
+# TAB 3: HADDOCK3 DOCKING & CONTACT ANALYSIS (NON-STANDARD BASE COMPATIBLE)
 # ==============================================================================
+import numpy as np
+
+
+def prepare_canonical_aptamer_for_haddock(
+    input_pdb_path: Path, output_pdb_path: Path
+):
+    """Converts modified nucleobases (CFZ, UFT, UMS, ADS) into canonical RNA
+
+    (C, U, U, A) and suppresses non-standard atoms so HADDOCK3 [topoaa] generates
+    CNS topologies without stripping residues or crashing.
+    """
+    res_map = {
+        'CFZ': 'C',
+        'UFT': 'U',
+        'UMS': 'U',
+        'ADS': 'A',
+    }
+
+    # Atom types not recognized by CNS standard dna-rna.top
+    skip_atoms = {"F2'", "SE2'", "CA'", "HA'1", "HA'2", "HA'3"}
+    atom_rename = {'S2P': 'O1P', 'S3P': 'O2P'}
+
+    cleaned_lines = []
+    with open(input_pdb_path, 'r') as f:
+        for line in f:
+            if line.startswith(('ATOM', 'HETATM')):
+                atom_name = line[12:16].strip()
+                res_name = line[17:20].strip()
+
+                if atom_name in skip_atoms:
+                    continue
+
+                new_res = res_map.get(res_name, res_name)
+                new_atom = atom_rename.get(atom_name, atom_name)
+
+                # Format atom name adhering strictly to PDB column specification
+                if len(new_atom) == 4 or (
+                    len(new_atom) > 0 and new_atom[0].isdigit()
+                ):
+                    formatted_atom = f'{new_atom:<4}'
+                else:
+                    formatted_atom = f' {new_atom:<3}'
+
+                formatted_res = f'{new_res:>3}'
+                # Enforce chain B and canonical RNA representation
+                new_line = f'ATOM  {line[6:12]}{formatted_atom} {formatted_res} B{line[22:]}'
+                cleaned_lines.append(new_line)
+            elif line.startswith(('TER', 'END')):
+                cleaned_lines.append(line)
+
+    with open(output_pdb_path, 'w') as f:
+        f.writelines(cleaned_lines)
+
+
+def restore_modified_aptamer_pose(
+    docked_pose_pdb: Path,
+    original_modified_pdb: Path,
+    output_complex_pdb: Path,
+):
+    """Calculates the rigid-body transformation (R, t) between the docked canonical pose
+
+    and the original relaxed aptamer, then restores all original non-standard nucleobases
+    (CFZ, UFT, UMS, ADS, F2', SE2', etc.) into the final docked complex.
+    """
+    fit_atoms = ["C1'", "C3'", "C4'", "O4'", "C5'"]
+
+    # 1. Extract docked backbone atoms (Chain B) and docked protein lines (Chain A)
+    docked_coords = {}
+    chain_a_lines = []
+    with open(docked_pose_pdb, 'r') as f:
+        for line in f:
+            if line.startswith(('ATOM', 'HETATM')):
+                chain = line[21]
+                if chain == 'A':
+                    chain_a_lines.append(line)
+                elif chain == 'B':
+                    res_num = int(line[22:26])
+                    atom_name = line[12:16].strip()
+                    if atom_name in fit_atoms:
+                        x = float(line[30:38])
+                        y = float(line[38:46])
+                        z = float(line[46:54])
+                        docked_coords[(res_num, atom_name)] = np.array(
+                            [x, y, z]
+                        )
+
+    # 2. Extract corresponding backbone atoms from original relaxed aptamer
+    orig_coords = {}
+    orig_all_lines = []
+    with open(original_modified_pdb, 'r') as f:
+        for line in f:
+            if line.startswith(('ATOM', 'HETATM')):
+                orig_all_lines.append(line)
+                res_num = int(line[22:26])
+                atom_name = line[12:16].strip()
+                if atom_name in fit_atoms:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    orig_coords[(res_num, atom_name)] = np.array([x, y, z])
+
+    # 3. Compute optimal Kabsch rotation and translation
+    common_keys = sorted(
+        list(set(docked_coords.keys()) & set(orig_coords.keys()))
+    )
+    if len(common_keys) < 3:
+        raise ValueError(
+            f'Insufficient matching backbone atoms ({len(common_keys)}) to align modified aptamer.'
+        )
+
+    p_docked = np.array([docked_coords[k] for k in common_keys])
+    p_orig = np.array([orig_coords[k] for k in common_keys])
+
+    c_docked = np.mean(p_docked, axis=0)
+    c_orig = np.mean(p_orig, axis=0)
+
+    p_docked_c = p_docked - c_docked
+    p_orig_c = p_orig - c_orig
+
+    H = p_orig_c.T @ p_docked_c
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = c_docked - c_orig @ R.T
+
+    # 4. Transform all atoms of the modified aptamer to the docked orientation
+    chain_b_restored_lines = []
+    for line in orig_all_lines:
+        x = float(line[30:38])
+        y = float(line[38:46])
+        z = float(line[46:54])
+        new_xyz = np.array([x, y, z]) @ R.T + t
+        # Ensure Chain ID is explicitly set to 'B'
+        new_line = f'{line[:21]}B{line[22:30]}{new_xyz[0]:8.3f}{new_xyz[1]:8.3f}{new_xyz[2]:8.3f}{line[54:]}'
+        chain_b_restored_lines.append(new_line)
+
+    # 5. Assemble final complex: Chain A (Protein) + Chain B (Full Modified Aptamer)
+    with open(output_complex_pdb, 'w') as f:
+        f.writelines(chain_a_lines)
+        if chain_a_lines and not chain_a_lines[-1].startswith('TER'):
+            f.write('TER\n')
+        f.writelines(chain_b_restored_lines)
+        f.write('TER\nEND\n')
+
+
 @celery_app.task
-def run_haddock_docking_task(work_dir: str, protein_pdb: bytes, dna_pdb: bytes, sampling: int = 20, cmrest: bool = True):
+def run_haddock_docking_task(
+    work_dir: str,
+    protein_pdb: bytes,
+    dna_pdb: bytes,
+    sampling: int = 20,
+    cmrest: bool = True,
+):
     wd = Path(work_dir)
     try:
-        with open(wd / "RBD.pdb", "wb") as f: f.write(protein_pdb)
-        with open(wd / "DNA.pdb", "wb") as f: f.write(dna_pdb)
+        raw_rbd = wd / 'RBD.pdb'
+        raw_dna = wd / 'DNA.pdb'
+        with open(raw_rbd, 'wb') as f:
+            f.write(protein_pdb)
+        with open(raw_dna, 'wb') as f:
+            f.write(dna_pdb)
 
         # 1. Format Chain IDs
-        subprocess.run("pdb_chain -A RBD.pdb > RBD_fixed.pdb", shell=True, cwd=wd, check=True)
-        subprocess.run("pdb_chain -B DNA.pdb > DNA_fixed.pdb", shell=True, cwd=wd, check=True)
+        subprocess.run(
+            'pdb_chain -A RBD.pdb > RBD_fixed.pdb',
+            shell=True,
+            cwd=wd,
+            check=True,
+        )
+        subprocess.run(
+            'pdb_chain -B DNA.pdb > DNA_modified.pdb',
+            shell=True,
+            cwd=wd,
+            check=True,
+        )
 
-        # 2. HADDOCK3 Configuration
+        # 2. Prepare Canonical Scaffold for HADDOCK3 CNS topology
+        prepare_canonical_aptamer_for_haddock(
+            wd / 'DNA_modified.pdb', wd / 'DNA_fixed.pdb'
+        )
+
+        # 3. HADDOCK3 Configuration
         docking_cfg = f"""
 run_dir = "rigid_body_docking"
 mode = "local"
@@ -83,87 +257,156 @@ molecules = ["RBD_fixed.pdb", "DNA_fixed.pdb"]
 sampling = {sampling}
 cmrest = {"true" if cmrest else "false"}
 """
-        with open(wd / "docking.cfg", "w") as f:
+        with open(wd / 'docking.cfg', 'w') as f:
             f.write(docking_cfg)
 
-        subprocess.run(["haddock3", "docking.cfg"], cwd=wd, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ['haddock3', 'docking.cfg'],
+            cwd=wd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-        # 3. Parse Docking Scores
-        out_folder = wd / "rigid_body_docking" / "1_rigidbody"
-        docked_poses = sorted(glob.glob(str(out_folder / "*.pdb.gz")))
+        # 4. Parse Docking Scores
+        out_folder = wd / 'rigid_body_docking' / '1_rigidbody'
+        docked_poses = sorted(glob.glob(str(out_folder / '*.pdb.gz')))
         if not docked_poses:
-            return {"status": "failed", "message": "No docked poses generated by HADDOCK3."}
+            return {
+                'status': 'failed',
+                'message': 'No docked poses generated by HADDOCK3.',
+            }
 
         pose_data = []
         for p_path in docked_poses:
-            p_name = Path(p_path).name.replace(".pdb.gz", "")
+            p_name = Path(p_path).name.replace('.pdb.gz', '')
             metrics = {
-                'Pose': p_name, 'HADDOCK Score': None, 'E_vdw (kcal/mol)': None,
-                'E_elec (kcal/mol)': None, 'E_desolv (kcal/mol)': None,
-                'E_air (kcal/mol)': None, 'BSA (Å²)': None
+                'Pose': p_name,
+                'HADDOCK Score': None,
+                'E_vdw (kcal/mol)': None,
+                'E_elec (kcal/mol)': None,
+                'E_desolv (kcal/mol)': None,
+                'E_air (kcal/mol)': None,
+                'BSA (Å²)': None,
             }
             with gzip.open(p_path, 'rt') as f:
                 for line in f:
-                    if line.startswith("REMARK HADDOCK score:"):
-                        metrics['HADDOCK Score'] = float(line.split(":")[1].strip())
-                    elif line.startswith("REMARK vdw energy:"):
-                        metrics['E_vdw (kcal/mol)'] = float(line.split(":")[1].strip())
-                    elif line.startswith("REMARK elec energy:"):
-                        metrics['E_elec (kcal/mol)'] = float(line.split(":")[1].strip())
-                    elif line.startswith("REMARK desolv energy:"):
-                        metrics['E_desolv (kcal/mol)'] = float(line.split(":")[1].strip())
-                    elif line.startswith("REMARK air energy:"):
-                        metrics['E_air (kcal/mol)'] = float(line.split(":")[1].strip())
-                    elif line.startswith("REMARK buried surface area:"):
-                        metrics['BSA (Å²)'] = float(line.split(":")[1].strip())
-                    elif line.startswith("ATOM"):
+                    if line.startswith('REMARK HADDOCK score:'):
+                        metrics['HADDOCK Score'] = float(
+                            line.split(':')[1].strip()
+                        )
+                    elif line.startswith('REMARK vdw energy:'):
+                        metrics['E_vdw (kcal/mol)'] = float(
+                            line.split(':')[1].strip()
+                        )
+                    elif line.startswith('REMARK elec energy:'):
+                        metrics['E_elec (kcal/mol)'] = float(
+                            line.split(':')[1].strip()
+                        )
+                    elif line.startswith('REMARK desolv energy:'):
+                        metrics['E_desolv (kcal/mol)'] = float(
+                            line.split(':')[1].strip()
+                        )
+                    elif line.startswith('REMARK air energy:'):
+                        metrics['E_air (kcal/mol)'] = float(
+                            line.split(':')[1].strip()
+                        )
+                    elif line.startswith('REMARK buried surface area:'):
+                        metrics['BSA (Å²)'] = float(line.split(':')[1].strip())
+                    elif line.startswith('ATOM'):
                         break
             pose_data.append(metrics)
 
         df_scores = pd.DataFrame(pose_data)
         if df_scores['HADDOCK Score'].notnull().any():
-            df_scores = df_scores.sort_values(by='HADDOCK Score', ascending=True).reset_index(drop=True)
-        df_scores.to_csv(wd / "haddock3_docking_scores.csv", index=False)
+            df_scores = df_scores.sort_values(
+                by='HADDOCK Score', ascending=True
+            ).reset_index(drop=True)
+        df_scores.to_csv(wd / 'haddock3_docking_scores.csv', index=False)
 
-        # 4. Decompress Best Pose
+        # 5. Decompress Best Pose and Restore Full Non-Standard Nucleobases
         best_pose_gz = docked_poses[0]
-        best_pose_pdb = wd / "docked_complex_best.pdb"
-        with gzip.open(best_pose_gz, 'rt') as f_in, open(best_pose_pdb, 'w') as f_out:
+        temp_canonical_pdb = wd / 'docked_canonical_temp.pdb'
+        with (
+            gzip.open(best_pose_gz, 'rt') as f_in,
+            open(temp_canonical_pdb, 'w') as f_out,
+        ):
             f_out.write(f_in.read())
 
-        # 5. Extract Residue Contacts & H-Bonds (< 4.0 Å and < 3.5 Å)
+        best_pose_pdb = wd / 'docked_complex_best.pdb'
+        restore_modified_aptamer_pose(
+            docked_pose_pdb=temp_canonical_pdb,
+            original_modified_pdb=wd / 'DNA_modified.pdb',
+            output_complex_pdb=best_pose_pdb,
+        )
+
+        # 6. Extract Contacts & H-Bonds (Preserving F, SE, S for 5DO4 interface)
         from Bio.PDB import PDBParser
+
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure('complex', str(best_pose_pdb))
         chain_a, chain_b = structure[0]['A'], structure[0]['B']
         contacts, hbonds = [], []
-        heteroatoms = {'N', 'O', 'S', 'F', 'P'}
+        # Added SE and F for halogen/selenium coordination with Thrombin Exosite I
+        heteroatoms = {'N', 'O', 'S', 'F', 'P', 'SE'}
 
         for atom_a in chain_a.get_atoms():
-            if atom_a.element == 'H': continue
+            if atom_a.element == 'H':
+                continue
             for atom_b in chain_b.get_atoms():
-                if atom_b.element == 'H': continue
+                if atom_b.element == 'H':
+                    continue
                 dist = atom_a - atom_b
                 if dist <= 4.0:
-                    r_a = f"{atom_a.get_parent().get_resname()}{atom_a.get_parent().get_id()[1]}"
-                    r_b = f"{atom_b.get_parent().get_resname()}{atom_b.get_parent().get_id()[1]}"
-                    contacts.append({'Protein Residue': r_a, 'DNA Residue': r_b, 'Distance (Å)': round(float(dist), 2)})
-                    if dist <= 3.5 and atom_a.element in heteroatoms and atom_b.element in heteroatoms:
-                        hbonds.append({'Protein Residue': r_a, 'Protein Atom': atom_a.get_name(), 'DNA Residue': r_b, 'DNA Atom': atom_b.get_name(), 'Distance (Å)': round(float(dist), 2)})
+                    r_a = f'{atom_a.get_parent().get_resname()}{atom_a.get_parent().get_id()[1]}'
+                    r_b = f'{atom_b.get_parent().get_resname()}{atom_b.get_parent().get_id()[1]}'
+                    contacts.append({
+                        'Protein Residue': r_a,
+                        'DNA Residue': r_b,
+                        'Distance (Å)': round(float(dist), 2),
+                    })
+                    if (
+                        dist <= 3.5
+                        and atom_a.element in heteroatoms
+                        and atom_b.element in heteroatoms
+                    ):
+                        hbonds.append({
+                            'Protein Residue': r_a,
+                            'Protein Atom': atom_a.get_name(),
+                            'DNA Residue': r_b,
+                            'DNA Atom': atom_b.get_name(),
+                            'Distance (Å)': round(float(dist), 2),
+                        })
 
-        pd.DataFrame(contacts).drop_duplicates().to_csv(wd / "interfacial_contacts.csv", index=False)
-        pd.DataFrame(hbonds).drop_duplicates().to_csv(wd / "hydrogen_bonds.csv", index=False)
+        pd.DataFrame(contacts).drop_duplicates().to_csv(
+            wd / 'interfacial_contacts.csv', index=False
+        )
+        pd.DataFrame(hbonds).drop_duplicates().to_csv(
+            wd / 'hydrogen_bonds.csv', index=False
+        )
 
-        # Zip Output
-        zip_path = wd / "haddock3_docking_results.zip"
+        # 7. Zip Output
+        zip_path = wd / 'haddock3_docking_results.zip'
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
-            for fname in ["docked_complex_best.pdb", "haddock3_docking_scores.csv", "interfacial_contacts.csv", "hydrogen_bonds.csv"]:
+            for fname in [
+                'docked_complex_best.pdb',
+                'haddock3_docking_scores.csv',
+                'interfacial_contacts.csv',
+                'hydrogen_bonds.csv',
+            ]:
                 if (wd / fname).exists():
                     z.write(wd / fname, arcname=fname)
 
-        return {"status": "success", "result_file": str(zip_path), "scores": df_scores.to_dict(orient="records")}
+        return {
+            'status': 'success',
+            'result_file': str(zip_path),
+            'scores': df_scores.to_dict(orient='records'),
+        }
     except Exception as e:
-        return {"status": "failed", "message": f"HADDOCK3 Docking Error: {str(e)}"}
+        return {
+            'status': 'failed',
+            'message': f'HADDOCK3 Docking Error: {str(e)}',
+        }
 
 # ==============================================================================
 # TAB 4: COMPLEX COARSE-GRAINED PREPARATION (PROTEIN + NUCLEIC ACID)
