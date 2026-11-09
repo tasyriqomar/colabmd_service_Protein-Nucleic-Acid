@@ -374,20 +374,23 @@ with tab4:
         if custom_pdb:
             selected_complex_bytes = custom_pdb.getvalue()
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        dnatype = st.selectbox("Nucleic Acid Strand Type", ["ss", "ds"], index=0, help="ss: Single-stranded, ds: Double-stranded")
+        # Defaults to the user's choice from Tab 1 if available
+        default_idx = 0 if st.session_state.get("aptamer_type", "RNA") == "RNA" else 1
+        na_type = st.selectbox("Aptamer Type", ["RNA", "DNA"], index=default_idx)
     with c2:
-        elastic_net = st.checkbox("Enable Elastic Network for Protein (-elastic)", value=True)
+        dnatype = st.selectbox("Strand Type", ["ss", "ds"], index=0, help="ss: Single-stranded, ds: Double-stranded")
+    with c3:
+        elastic_net = st.checkbox("Enable Elastic Network", value=True)
 
     if st.button("Generate Coarse-Grained Complex & Solvated System") and selected_complex_bytes:
         st.session_state.cg_prep_zip_bytes = None
-        st.session_state.cg_gro_preview = ""
-        st.session_state.sys_top_preview = ""
+        st.session_state.na_type = na_type
         
-        with st.spinner("Generating CG models, running insane.py (10x10x10 nm box, 0.15 M NaCl), and writing system.top..."):
+        with st.spinner(f"Generating Martini 3 {na_type} CG model and solvating..."):
             files = {"complex_pdb": ("docked_complex_best.pdb", selected_complex_bytes, "chemical/x-pdb")}
-            data = {"dnatype": dnatype, "elastic": elastic_net}
+            data = {"na_type": na_type, "dnatype": dnatype, "elastic": elastic_net}
             try:
                 res = requests.post(f"{API_URL}/run-complex-cg-prep", files=files, data=data)
                 if res.status_code == 200:
@@ -730,9 +733,10 @@ with tab9:
                 st.session_state.mmgbsa_zip_bytes = None
                 st.session_state.mmgbsa_summary = ""
                 with st.spinner("Computing binding free energies via gmx_MMPBSA on Colab..."):
+                    na_label = st.session_state.get("na_type", "RNA")
                     payload = {
                         "job_id": job_id_mm,
-                        "ligand_name": "DNA",
+                        "ligand_name": na_label,
                         "protein_idx": int(prot_idx),
                         "ligand_idx": int(na_idx)
                     }
@@ -782,11 +786,11 @@ with tab9:
             key="mmgbsa_download"
         )
         
-        # Display the custom Protein-DNA decomposition graph
+        # Display the custom Protein-DNA/RNA decomposition graph
         try:
             with zipfile.ZipFile(io.BytesIO(st.session_state.mmgbsa_zip_bytes)) as z:
                 if "decomp_favorable_interactions.png" in z.namelist():
-                    st.subheader("🔬 Protein-DNA Favorable Interactions (Decomposition)")
+                    st.subheader("🔬 Protein-DNA/RNA Favorable Interactions (Decomposition)")
                     st.image(z.read("decomp_favorable_interactions.png"), use_container_width=True)
         except Exception as e:
             pass
