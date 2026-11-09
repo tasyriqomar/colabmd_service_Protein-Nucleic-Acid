@@ -124,7 +124,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
 # ------------------------------------------
 with tab1:
     st.header("Step 1: Aptamer Processing")
-    st.markdown("Convert RNA structures to DNA (`rna_to_dna_with_methyl.py`) and rename residues for GROMACS parameterization.")
+    st.markdown("Prepare RNA or DNA aptamer structures for molecular dynamics and docking.")
     
     st.info("💡 **Don't have a 3D structure yet?**")
     st.markdown("""
@@ -134,13 +134,23 @@ with tab1:
     st.markdown("---")
         
     aptamer_file = st.file_uploader("Upload Aptamer Structure (PDB)", type=["pdb"], key="apt_upload")
-    convert_rna = st.checkbox("Convert RNA (Uracil) to DNA (Thymine)", value=True)
+    
+    # User choice: RNA or DNA
+    aptamer_type = st.radio(
+        "Select Aptamer Molecule Type:",
+        ["RNA", "DNA"],
+        index=0,
+        horizontal=True,
+        help="Choose RNA to preserve ribose 2' modifications (CFZ, UFT, UMS, ADS) or DNA to convert/standardize as deoxyribonucleotides."
+    )
     
     if st.button("Process Aptamer PDB") and aptamer_file:
         st.session_state.aptamer_bytes = None
-        with st.spinner("Processing Aptamer on Colab..."):
+        st.session_state.aptamer_type = aptamer_type  # Persist choice in session state
+        
+        with st.spinner(f"Processing {aptamer_type} Aptamer on Colab..."):
             files = {"aptamer_pdb": (aptamer_file.name, aptamer_file.getvalue(), "chemical/x-pdb")}
-            data = {"convert_rna": convert_rna}
+            data = {"aptamer_type": aptamer_type, "convert_rna": (aptamer_type == "DNA")}
             try:
                 res = requests.post(f"{API_URL}/run-aptamer", files=files, data=data)
                 if res.status_code == 200:
