@@ -54,22 +54,19 @@ def download_result(task_id: str):
     raise HTTPException(status_code=404, detail="File not found")
 
 @app.post("/api/v1/run-aptamer")
-async def api_aptamer(
-    aptamer_pdb: UploadFile = File(...),
-    aptamer_type: str = Form("RNA"),
-    convert_rna: bool = Form(False)
-):
+async def api_aptamer(aptamer_pdb: UploadFile = File(...), convert_rna: bool = Form(True)):
     job_id = f"apt_{uuid.uuid4().hex[:10]}"
     work_dir = SHARED_DATA / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
     content = await aptamer_pdb.read()
     
+    # Save both casing variants directly before Celery picks it up
     with open(work_dir / "Aptamer.pdb", "wb") as f:
         f.write(content)
     with open(work_dir / "aptamer.pdb", "wb") as f:
         f.write(content)
 
-    task = run_aptamer_task.delay(str(work_dir), content, aptamer_type, convert_rna)
+    task = run_aptamer_task.delay(str(work_dir), content, convert_rna)
     return {"task_id": task.id, "job_id": job_id}
 
 @app.post("/api/v1/run-haddock-docking")
@@ -85,7 +82,6 @@ async def api_docking(protein_pdb: UploadFile = File(...), dna_pdb: UploadFile =
 @app.post("/api/v1/run-complex-cg-prep")
 async def api_complex_cg_prep(
     complex_pdb: UploadFile = File(...),
-    na_type: str = Form("RNA"),
     dnatype: str = Form("ss"),
     elastic: bool = Form(True)
 ):
@@ -93,7 +89,7 @@ async def api_complex_cg_prep(
     work_dir = SHARED_DATA / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
     content = await complex_pdb.read()
-    task = run_complex_cg_prep_task.delay(str(work_dir), content, na_type, dnatype, elastic)
+    task = run_complex_cg_prep_task.delay(str(work_dir), content, dnatype, elastic)
     return {"task_id": task.id, "job_id": job_id}
 
 @app.post("/api/v1/run-backmapping")
