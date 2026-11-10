@@ -13,10 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /lib/apt/lists/*
 
 # Append to Dockerfile
-RUN apt-get update && apt-get install -y git
-RUN pip install vermouth  # Installs martinize2
-RUN git clone https://github.com/DanYev/Martini-3-DNA-RNA.git /opt/martini_dna_rna
-ENV PYTHONPATH="/opt/martini_dna_rna:${PYTHONPATH}"
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /lib/apt/lists/* \
+    && git clone https://github.com/DanYev/Martini-3-DNA-RNA.git /opt/martini_dna_rna \
+    && chmod +x /opt/martini_dna_rna/*.py
 
 # Copy and install lightweight frontend requirements
 COPY requirements.txt /app/requirements.txt
