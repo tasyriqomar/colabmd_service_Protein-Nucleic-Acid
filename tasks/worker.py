@@ -417,26 +417,73 @@ cmrest = {"true" if cmrest else "false"}
 # ==============================================================================
 # TAB 4: COMPLEX COARSE-GRAINED PREPARATION (PROTEIN + NUCLEIC ACID)
 # ==============================================================================
-import os
-from pathlib import Path
-import re
-import shutil
-import subprocess
-import sys
-import zipfile
+
+
+def ensure_martini_tools(
+    tools_repo: Path = Path("/opt/martini_dna_rna"),
+) -> Path:
+  """Guarantees that Martini-3-DNA-RNA scripts are available on disk."""
+  rna_script = tools_repo / "martinize_rna_v3.0.0.py"
+  if not rna_script.exists():
+    try:
+      # If directory exists but script is missing, remove it cleanly before clone
+      if tools_repo.exists():
+        shutil.rmtree(tools_repo, ignore_errors=True)
+
+      subprocess.run(
+          [
+              "git",
+              "clone",
+              "https://github.com/DanYev/Martini-3-DNA-RNA.git",
+              str(tools_repo),
+          ],
+          check=True,
+          capture_output=True,
+          text=True,
+      )
+      for py_file in tools_repo.glob("*.py"):
+        try:
+          py_file.chmod(py_file.stat().st_mode | 0o111)
+        except Exception:
+          pass
+    except Exception as ge:
+      # Direct fallback download via raw GitHub if git clone fails
+      try:
+        tools_repo.mkdir(parents=True, exist_ok=True)
+        raw_base = (
+            "https://raw.githubusercontent.com/DanYev/Martini-3-DNA-RNA/main/"
+        )
+        for fname in [
+            "martinize_rna_v3.0.0.py",
+            "martinize_dna_alpha.py",
+            "martini_v3.0.0.itp",
+            "martini_v3.0.0_solvents.itp",
+            "martini_v3.0.0_ions.itp",
+        ]:
+          dst = tools_repo / fname
+          if not dst.exists():
+            urllib.request.urlretrieve(raw_base + fname, str(dst))
+        if rna_script.exists():
+          rna_script.chmod(rna_script.stat().st_mode | 0o111)
+      except Exception:
+        raise RuntimeError(
+            "Failed to fetch Martini 3 DNA/RNA tools into /opt/martini_dna_rna:"
+            f" {str(ge)}"
+        )
+
+  if not rna_script.exists():
+    raise FileNotFoundError(
+        f"Script {rna_script} not found. Please ensure"
+        " https://github.com/DanYev/Martini-3-DNA-RNA is cloned into"
+        " /opt/martini_dna_rna."
+    )
+  return tools_repo
 
 
 def sanitize_na_for_cg(
     input_pdb: Path, output_pdb: Path, na_type: str = "RNA"
 ) -> bool:
-  """Sanitizes standard and non-standard nucleic acid structures for Martini coarse-graining.
-
-  - Converts modified nucleobases (CFZ, UMS, UFT, ADS, etc.) to canonical equivalents.
-  - Converts ribose asterisk naming (C1*) to IUPAC prime naming (C1').
-  - Strips non-standard modifier atoms (F2', SE2', etc.) incompatible with
-  Martini 3 topology.
-  - Formats columns adhering strictly to PDB specifications.
-  """
+  """Normalizes standard and non-standard nucleic acid structures for coarse-graining."""
   if na_type.upper() == "RNA":
     res_map = {
         # Modified RNA nucleobases -> Canonical RNA
@@ -451,7 +498,7 @@ def sanitize_na_for_cg(
         "OMG": "G",
         "A2M": "A",
         "2AP": "A",
-        # 3-Letter RNA codes -> Single-letter RNA
+        # 3-Letter standard RNA codes -> Single-letter RNA
         "RA": "A",
         "RU": "U",
         "RC": "C",
@@ -460,7 +507,7 @@ def sanitize_na_for_cg(
         "URA": "U",
         "CYT": "C",
         "GUA": "G",
-        # DNA fallback names
+        # DNA codes if converted earlier
         "DA": "A",
         "DT": "U",
         "DC": "C",
@@ -485,7 +532,6 @@ def sanitize_na_for_cg(
         "U": "DT",
     }
 
-  # Modifier atoms present in docking/all-atom models to skip for coarse-graining
   skip_atoms = {
       "F2'",
       "SE2'",
@@ -517,13 +563,11 @@ def sanitize_na_for_cg(
       if atom_name in skip_atoms:
         continue
 
-      # Standardize asterisks to primes (C1* -> C1')
+      # Standardize ribose asterisks to primes (e.g. C1* -> C1')
       atom_name = atom_name.replace("*", "'")
       atom_name = atom_replace.get(atom_name, atom_name)
-
       canonical_res = res_map.get(res_name, res_name)
 
-      # Strict PDB format spacing: Atom name (12-16), Res name (17-20)
       if len(atom_name) == 4 or (len(atom_name) > 0 and atom_name[0].isdigit()):
         fmt_atom = f"{atom_name:<4}"
       else:
@@ -590,23 +634,7 @@ def run_complex_cg_prep_task(
     # ----------------------------------------------------------------------
     # 0. Ensure Martini 3 DNA/RNA Tools are Available
     # ----------------------------------------------------------------------
-    tools_repo = Path("/opt/martini_dna_rna")
-    if not (tools_repo / "martinize_rna_v3.0.0.py").exists():
-      try:
-        tools_repo.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "https://github.com/DanYev/Martini-3-DNA-RNA.git",
-                str(tools_repo),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-      except Exception as ge:
-        pass
+    tools_repo = ensure_martini_tools(Path("/opt/martini_dna_rna"))
 
     complex_pdb = wd / "docked_complex_best.pdb"
     with open(complex_pdb, "wb") as f:
@@ -657,6 +685,8 @@ def run_complex_cg_prep_task(
           "OMC",
           "OMG",
           "A2M",
+          "2AP",
+          "T",
       }
       prot_lines, na_lines = [], []
       with open(complex_pdb, "r") as f:
@@ -681,13 +711,8 @@ def run_complex_cg_prep_task(
     # ----------------------------------------------------------------------
     if na_type.upper() == "RNA":
       rna_script = tools_repo / "martinize_rna_v3.0.0.py"
-      if not rna_script.exists():
-        raise FileNotFoundError(
-            f"Script {rna_script} not found. Ensure repository is cloned into"
-            " /opt/martini_dna_rna."
-        )
-
       na_for_cg = wd / "rna_for_cg.pdb"
+
       if not sanitize_na_for_cg(na_aa_pdb, na_for_cg, na_type="RNA"):
         raise ValueError(
             "Failed to sanitize RNA coordinates. Chain B contains no valid RNA"
@@ -732,7 +757,6 @@ def run_complex_cg_prep_task(
             "Nucleic_A.itp",
         ]
       else:
-        # Legacy fallback if alpha script is absent
         cg_tools_dir = Path("/app/tools/CGMD")
         subprocess.run(
             ["gmx", "editconf", "-f", str(na_for_cg), "-o", "dna_aa.gro"],
@@ -741,7 +765,7 @@ def run_complex_cg_prep_task(
             capture_output=True,
         )
         cmd_dna = [
-            "python2",
+            "python2" if shutil.which("python2") else sys.executable,
             str(cg_tools_dir / "martinize-dna.py"),
             "-dnatype",
             dnatype,
@@ -763,7 +787,7 @@ def run_complex_cg_prep_task(
           capture_output=True,
       )
 
-    # Synchronize molecule name inside Nucleic_A.itp
+    # Standardize molecule identifier
     synchronize_moleculetype(wd / "Nucleic_A.itp", "Nucleic_A")
 
     # ----------------------------------------------------------------------
@@ -792,7 +816,7 @@ def run_complex_cg_prep_task(
         capture_output=True,
     )
 
-    # Standardize Protein ITP name and moleculetype
+    # Rename generated protein ITP to Protein_A.itp and synchronize moleculetype
     for p_itp in wd.glob("molecule_*.itp"):
       dest = wd / "Protein_A.itp"
       if dest.exists():
@@ -828,7 +852,7 @@ def run_complex_cg_prep_task(
     with open(wd / "complex_CG.gro", "w") as f:
       f.writelines(merged)
 
-    # Locate and execute insane.py
+    # Locate and copy insane.py
     insane_src = Path("/app/tools/CGMD/insane.py")
     if not insane_src.exists():
       insane_src = Path("/opt/insane.py")
@@ -866,7 +890,6 @@ def run_complex_cg_prep_task(
           mol = parts[0].replace("NA+", "NA").replace("CL-", "CL")
           solvent_molecules.append(f"{mol:<10} {parts[1]:>7}\n")
 
-    # Fallback solvent counting if insane stderr is empty
     if not solvent_molecules and (wd / "system.gro").exists():
       w_cnt, na_cnt, cl_cnt = 0, 0, 0
       with open(wd / "system.gro", "r") as f:
@@ -888,7 +911,6 @@ def run_complex_cg_prep_task(
     # ----------------------------------------------------------------------
     # 5. Build Unified system.top and Copy Force Field ITPs
     # ----------------------------------------------------------------------
-    # Copy all auxiliary Martini 3 ITP files into working directory
     for search_dir in [
         tools_repo,
         tools_repo / "rna_v3.0.0_itps",
@@ -970,7 +992,6 @@ def run_complex_cg_prep_task(
       for fname in files_to_zip:
         if (wd / fname).exists():
           z.write(wd / fname, arcname=fname)
-      # Bundle all copied and generated ITP files (force fields and rubber bands)
       for itp in wd.glob("*.itp"):
         if itp.name not in files_to_zip:
           z.write(itp, arcname=itp.name)
@@ -988,7 +1009,11 @@ def run_complex_cg_prep_task(
     }
 
   except subprocess.CalledProcessError as e:
-    err = e.stderr if e.stderr else e.stdout
+    err = (
+        e.stderr.strip()
+        if e.stderr
+        else (e.stdout.strip() if e.stdout else str(e))
+    )
     return {"status": "failed", "message": f"CG Preparation Error: {err}"}
   except Exception as e:
     return {"status": "failed", "message": f"CG Preparation Error: {str(e)}"}
