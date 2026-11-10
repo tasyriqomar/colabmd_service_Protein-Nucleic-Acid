@@ -512,35 +512,52 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             f.write("END\n")
 
         # ----------------------------------------------------------------------
-        # 4. Coarse-Grain Nucleic Acid (DNA: martini-dna.py | RNA: martini-nucleotide.py)
+        # 4. Coarse-Grain Nucleic Acid (DNA vs RNA with Safe Fallback)
         # ----------------------------------------------------------------------
         subprocess.run(["gmx", "editconf", "-f", "na_aa.pdb", "-o", "na_aa.gro"], cwd=str(wd), check=True, capture_output=True)
 
         if is_rna:
-            # Locate RNA script
-            rna_script = cg_tools_dir / "martini-nucleotide.py"
-            if not rna_script.exists():
-                rna_script = cg_tools_dir / "martinize-nucleotide.py"
-
-            if not rna_script.exists():
-                raise FileNotFoundError("Neither martini-nucleotide.py nor martinize-nucleotide.py was found in /app/tools/CGMD")
-
-            # Translate strand type for RNA script (ss vs ds-stiff)
-            rna_type = "ss" if dnatype == "ss" else "ds-stiff"
-            na_cmd = [
-                "python2", str(rna_script),
-                "-type", rna_type,
-                "-f", "na_aa.gro",
-                "-o", "dna.top",
-                "-x", "dna_CG.pdb"
+            # Check for RNA scripts
+            rna_candidates = [
+                cg_tools_dir / "martini-nucleotide.py",
+                cg_tools_dir / "martinize-nucleotide.py"
             ]
-        else:
-            # Locate DNA script
-            dna_script = cg_tools_dir / "martini-dna.py"
-            if not dna_script.exists():
-                dna_script = cg_tools_dir / "martinize-dna.py"
+            rna_script = next((s for s in rna_candidates if s.exists()), None)
 
-            if not dna_script.exists():
+            if rna_script:
+                rna_type = "ss" if dnatype == "ss" else "ds-stiff"
+                na_cmd = [
+                    "python2", str(rna_script),
+                    "-type", rna_type,
+                    "-f", "na_aa.gro",
+                    "-o", "dna.top",
+                    "-x", "dna_CG.pdb"
+                ]
+            else:
+                # Fallback to martinize-dna.py / martini-dna.py if nucleotide script is missing
+                dna_candidates = [
+                    cg_tools_dir / "martini-dna.py",
+                    cg_tools_dir / "martinize-dna.py"
+                ]
+                fallback_script = next((s for s in dna_candidates if s.exists()), None)
+                if not fallback_script:
+                    raise FileNotFoundError("No coarse-graining script found in /app/tools/CGMD")
+
+                na_cmd = [
+                    "python2", str(fallback_script),
+                    "-dnatype", dnatype,
+                    "-f", "na_aa.gro",
+                    "-o", "dna.top",
+                    "-x", "dna_CG.pdb"
+                ]
+        else:
+            # DNA branch
+            dna_candidates = [
+                cg_tools_dir / "martini-dna.py",
+                cg_tools_dir / "martinize-dna.py"
+            ]
+            dna_script = next((s for s in dna_candidates if s.exists()), None)
+            if not dna_script:
                 raise FileNotFoundError("Neither martini-dna.py nor martinize-dna.py was found in /app/tools/CGMD")
 
             na_cmd = [
