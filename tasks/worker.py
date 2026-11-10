@@ -23,43 +23,37 @@ celery_app = Celery(
 # TAB 1: APTAMER PREP
 # ==============================================================================
 @celery_app.task
-def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, aptamer_type: str = "RNA", convert_rna: bool = False):
+def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: bool):
     wd = Path(work_dir)
     wd.mkdir(parents=True, exist_ok=True)
     try:
-        raw_pdb = wd / "aptamer_raw.pdb"
-        with open(raw_pdb, "wb") as f:
+        # Guarantee both filenames exist in the task working directory
+        with open(wd / "Aptamer.pdb", "wb") as f:
+            f.write(aptamer_pdb_content)
+        with open(wd / "aptamer.pdb", "wb") as f:
             f.write(aptamer_pdb_content)
 
-        fixed_pdb = wd / "aptamer_fixed.pdb"
+        shutil.copy("/app/tools/Aptamer-Processing/rna_to_dna_with_methyl.py", wd / "rna_to_dna_with_methyl.py")
+        shutil.copy("/app/tools/Aptamer-Processing/rename_dna.py", wd / "rename_dna.py")
 
-        if aptamer_type.upper() == "DNA" or convert_rna:
-            # DNA Pipeline: Use legacy RNA->DNA methylator and renamer
-            shutil.copy("/app/tools/Aptamer-Processing/rna_to_dna_with_methyl.py", wd / "rna_to_dna_with_methyl.py")
-            shutil.copy("/app/tools/Aptamer-Processing/rename_dna.py", wd / "rename_dna.py")
-            shutil.copy(raw_pdb, wd / "Aptamer.pdb")
-
-            if convert_rna:
-                subprocess.run([sys.executable, "rna_to_dna_with_methyl.py"], cwd=str(wd), check=True, capture_output=True)
-            else:
-                shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
-
-            subprocess.run([sys.executable, "rename_dna.py"], cwd=str(wd), check=True, capture_output=True)
+        if convert_rna:
+            # Converts Aptamer.pdb -> aptamer_DNA.pdb
+            subprocess.run([sys.executable, "rna_to_dna_with_methyl.py"], cwd=str(wd), check=True, capture_output=True, text=True)
         else:
-            # RNA Pipeline: Keep original residue identities (CFZ, UMS, UFT, ADS, A, U, C, G)
-            # Reformat HETATM records into valid continuous chain records
-            with open(raw_pdb, "r") as f_in, open(fixed_pdb, "w") as f_out:
-                for line in f_in:
-                    if line.startswith(("ATOM", "HETATM")):
-                        # Standardize into ATOM records while preserving 3-letter residue name
-                        line_fixed = "ATOM  " + line[6:]
-                        f_out.write(line_fixed)
-                f_out.write("END\n")
+            # If already DNA, create aptamer_DNA.pdb for rename_dna.py
+            shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
 
+        # Converts aptamer_DNA.pdb -> aptamer_fixed.pdb
+        subprocess.run([sys.executable, "rename_dna.py"], cwd=str(wd), check=True, capture_output=True, text=True)
+
+        fixed_pdb = wd / "aptamer_fixed.pdb"
         if not fixed_pdb.exists():
             return {"status": "failed", "message": "Failed to generate aptamer_fixed.pdb"}
 
         return {"status": "success", "result_file": str(fixed_pdb)}
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if e.stderr else e.stdout
+        return {"status": "failed", "message": f"Aptamer Processing Error: {err}"}
     except Exception as e:
         return {"status": "failed", "message": str(e)}
 
