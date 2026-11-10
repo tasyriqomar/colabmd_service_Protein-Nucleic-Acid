@@ -409,7 +409,7 @@ cmrest = {"true" if cmrest else "false"}
         }
 
 # ==============================================================================
-# TAB 4: COMPLEX COARSE-GRAINED PREPARATION (PROTEIN + NUCLEIC ACID)
+# TAB 4: DUAL DNA/RNA COMPLEX COARSE-GRAINED PREPARATION
 # ==============================================================================
 @celery_app.task
 def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype: str = "ss", elastic: bool = True):
@@ -422,13 +422,12 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             f.write(complex_pdb_content)
 
         # ----------------------------------------------------------------------
-        # 1. Split docked_complex_best.pdb into Chain A (Protein) and Chain B (DNA)
+        # 1. Split Complex into Protein (Chain A) & Nucleic Acid (Chain B)
         # ----------------------------------------------------------------------
         prot_aa_pdb = wd / "protein_aa.pdb"
-        dna_aa_pdb = wd / "dna_aa.pdb"
+        na_aa_pdb = wd / "na_aa.pdb"
 
-        prot_lines = []
-        dna_lines = []
+        prot_lines, na_raw_lines = [], []
         with open(complex_pdb, "r") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
@@ -436,17 +435,21 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
                     if chain == "A":
                         prot_lines.append(line)
                     elif chain == "B":
-                        dna_lines.append(line)
+                        na_raw_lines.append(line)
 
-        if not prot_lines or not dna_lines:
-            dna_resnames = {"DA", "DT", "DG", "DC", "A", "T", "G", "C", "U"}
-            prot_lines, dna_lines = [], []
+        # Fallback if chains aren't explicitly tagged
+        if not prot_lines or not na_raw_lines:
+            all_na_res = {
+                "DA", "DT", "DG", "DC", "A", "T", "G", "C", "U", "URA", "ADE", "CYT", "GUA",
+                "CFZ", "UMS", "UFT", "ADS"
+            }
+            prot_lines, na_raw_lines = [], []
             with open(complex_pdb, "r") as f:
                 for line in f:
                     if line.startswith(("ATOM", "HETATM")):
-                        resn = line[17:20].strip()
-                        if resn in dna_resnames:
-                            dna_lines.append(line[:21] + "B" + line[22:])
+                        r_name = line[17:20].strip()
+                        if r_name in all_na_res:
+                            na_raw_lines.append(line[:21] + "B" + line[22:])
                         else:
                             prot_lines.append(line[:21] + "A" + line[22:])
 
@@ -454,26 +457,105 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             f.writelines(prot_lines)
             f.write("END\n")
 
-        with open(dna_aa_pdb, "w") as f:
-            f.writelines(dna_lines)
+        # ----------------------------------------------------------------------
+        # 2. Nucleic Acid Type Detection (DNA vs RNA)
+        # ----------------------------------------------------------------------
+        # Check for RNA identifiers: Uracil variants, ribose O2', or modified bases (CFZ, UMS, UFT, ADS)
+        is_rna = False
+        for line in na_raw_lines:
+            r_name = line[17:20].strip()
+            a_name = line[12:16].strip()
+            if r_name in {"U", "URA", "RU", "CFZ", "UMS", "UFT", "ADS"} or a_name in {"O2'", "HO2'", "F2'", "SE2'"}:
+                is_rna = True
+                break
+
+        # ----------------------------------------------------------------------
+        # 3. Sanitize Nucleic Acid for the Appropriate Tool
+        # ----------------------------------------------------------------------
+        # Alias atom names so centers of mass are computed accurately
+        atom_alias = {
+            "S2P": "OP1", "S3P": "OP2", "O1P": "OP1", "O2P": "OP2"
+        }
+
+        # Residue mappings
+        if is_rna:
+            # RNA targets canonical A, C, G, U
+            res_map = {
+                "CFZ": "C", "CYT": "C", "DC": "C", "C": "C",
+                "UFT": "U", "UMS": "U", "URA": "U", "DT": "U", "T": "U", "U": "U",
+                "ADS": "A", "ADE": "A", "DA": "A", "A": "A",
+                "GUA": "G", "DG": "G", "G": "G"
+            }
+        else:
+            # DNA targets canonical DA, DC, DG, DT
+            res_map = {
+                "CFZ": "DC", "CYT": "DC", "C": "DC", "DC": "DC",
+                "UFT": "DT", "UMS": "DT", "URA": "DT", "U": "DT", "DT": "DT", "T": "DT",
+                "ADS": "DA", "ADE": "DA", "A": "DA", "DA": "DA",
+                "GUA": "DG", "G": "DG", "DG": "DG"
+            }
+
+        sanitized_na_lines = []
+        for line in na_raw_lines:
+            atom_name = line[12:16].strip()
+            res_name = line[17:20].strip()
+
+            clean_atom = atom_alias.get(atom_name, atom_name)
+            clean_res = res_map.get(res_name, "U" if is_rna else "DT")
+
+            fmt_atom = f"{clean_atom:<4}" if len(clean_atom) == 4 or clean_atom[0].isdigit() else f" {clean_atom:<3}"
+            fmt_res = f"{clean_res:>3}"
+            sanitized_na_lines.append(f"ATOM  {line[6:12]}{fmt_atom} {fmt_res} B{line[22:]}")
+
+        with open(na_aa_pdb, "w") as f:
+            f.writelines(sanitized_na_lines)
             f.write("END\n")
 
         # ----------------------------------------------------------------------
-        # 2. Coarse-Grain DNA Aptamer using martinize-dna.py
+        # 4. Coarse-Grain Nucleic Acid (DNA: martini-dna.py | RNA: martini-nucleotide.py)
         # ----------------------------------------------------------------------
-        subprocess.run(["gmx", "editconf", "-f", "dna_aa.pdb", "-o", "dna_aa.gro"], cwd=str(wd), check=True, capture_output=True)
-        dna_cmd = [
-            "python2", str(cg_tools_dir / "martinize-dna.py"),
-            "-dnatype", dnatype,
-            "-f", "dna_aa.gro",
-            "-o", "dna.top",
-            "-x", "dna_CG.pdb"
-        ]
-        subprocess.run(dna_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
+        subprocess.run(["gmx", "editconf", "-f", "na_aa.pdb", "-o", "na_aa.gro"], cwd=str(wd), check=True, capture_output=True)
+
+        if is_rna:
+            # Locate RNA script
+            rna_script = cg_tools_dir / "martini-nucleotide.py"
+            if not rna_script.exists():
+                rna_script = cg_tools_dir / "martinize-nucleotide.py"
+
+            if not rna_script.exists():
+                raise FileNotFoundError("Neither martini-nucleotide.py nor martinize-nucleotide.py was found in /app/tools/CGMD")
+
+            # Translate strand type for RNA script (ss vs ds-stiff)
+            rna_type = "ss" if dnatype == "ss" else "ds-stiff"
+            na_cmd = [
+                "python2", str(rna_script),
+                "-type", rna_type,
+                "-f", "na_aa.gro",
+                "-o", "dna.top",
+                "-x", "dna_CG.pdb"
+            ]
+        else:
+            # Locate DNA script
+            dna_script = cg_tools_dir / "martini-dna.py"
+            if not dna_script.exists():
+                dna_script = cg_tools_dir / "martinize-dna.py"
+
+            if not dna_script.exists():
+                raise FileNotFoundError("Neither martini-dna.py nor martinize-dna.py was found in /app/tools/CGMD")
+
+            na_cmd = [
+                "python2", str(dna_script),
+                "-dnatype", dnatype,
+                "-f", "na_aa.gro",
+                "-o", "dna.top",
+                "-x", "dna_CG.pdb"
+            ]
+
+        subprocess.run(na_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
         subprocess.run(["gmx", "editconf", "-f", "dna_CG.pdb", "-o", "aptamer_CG.gro"], cwd=str(wd), check=True, capture_output=True)
 
         # ----------------------------------------------------------------------
-        # 3. Coarse-Grain Protein using martinize.py
+        # 5. Coarse-Grain Protein (martinize.py)
         # ----------------------------------------------------------------------
         prot_cmd = [
             "python2", str(cg_tools_dir / "martinize.py"),
@@ -489,7 +571,7 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         subprocess.run(["gmx", "editconf", "-f", "protein_CG.pdb", "-o", "protein_CG.gro"], cwd=str(wd), check=True, capture_output=True)
 
         # ----------------------------------------------------------------------
-        # 4. Generate Merged complex_CG.gro (Preserving Docked Interface)
+        # 6. Generate Merged complex_CG.gro
         # ----------------------------------------------------------------------
         with open(wd / "protein_CG.gro", "r") as f:
             p_gro_lines = f.readlines()
@@ -501,7 +583,8 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         total_atoms = len(p_atoms) + len(d_atoms)
         box_vector = p_gro_lines[-1] if len(p_gro_lines) > 2 else "  10.00000  10.00000  10.00000\n"
 
-        merged_gro = ["Complex Coarse-Grained Structure from Docked Pose\n", f"{total_atoms:>5}\n"]
+        mol_title = "RNA Aptamer" if is_rna else "DNA Aptamer"
+        merged_gro = [f"Complex Coarse-Grained Structure ({mol_title})\n", f"{total_atoms:>5}\n"]
         atom_count = 1
         for line in p_atoms:
             merged_gro.append(f"{line[:15]}{atom_count:>5}{line[20:]}")
@@ -511,14 +594,12 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             atom_count += 1
         merged_gro.append(box_vector)
 
-        complex_gro_path = wd / "complex_CG.gro"
-        with open(complex_gro_path, "w") as f:
+        with open(wd / "complex_CG.gro", "w") as f:
             f.writelines(merged_gro)
 
         # ----------------------------------------------------------------------
-        # 5. Box Solvation & Ionization via insane.py -> system.gro
+        # 7. Box Solvation & Ionization (insane.py)
         # ----------------------------------------------------------------------
-        # Copy insane.py to working directory if not present
         if (cg_tools_dir / "insane.py").exists():
             shutil.copy(cg_tools_dir / "insane.py", wd / "insane.py")
 
@@ -534,103 +615,127 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         ]
         insane_proc = subprocess.run(insane_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
 
-        # Parse solvent/ion molecules output by insane.py (written to stderr)
         solvent_molecules = []
         for line in insane_proc.stderr.splitlines():
             line_str = line.strip()
-            # insane outputs comment lines with ';', molecule counts lines without ';'
             if line_str and not line_str.startswith(";"):
                 parts = line_str.split()
                 if len(parts) >= 2 and parts[1].isdigit():
-                    mol_name = parts[0]
-                    mol_count = parts[1]
-                    # Rename NA+ -> NA, CL- -> CL
-                    mol_name_clean = mol_name.replace("NA+", "NA").replace("CL-", "CL")
-                    solvent_molecules.append(f"{mol_name_clean:<10} {mol_count:>7}\n")
+                    mol_name_clean = parts[0].replace("NA+", "NA").replace("CL-", "CL")
+                    solvent_molecules.append(f"{mol_name_clean:<10} {parts[1]:>7}\n")
 
-        # Fallback: Count directly from system.gro if insane stderr did not produce lines
         if not solvent_molecules and (wd / "system.gro").exists():
-            w_count, na_count, cl_count = 0, 0, 0
+            w_cnt, na_cnt, cl_cnt = 0, 0, 0
             with open(wd / "system.gro", "r") as f:
                 for line in f.readlines()[2:-1]:
-                    resname = line[5:10].strip()
-                    if resname == "W": w_count += 1
-                    elif "NA" in resname: na_count += 1
-                    elif "CL" in resname: cl_count += 1
-            if w_count > 0: solvent_molecules.append(f"{'W':<10} {w_count:>7}\n")
-            if na_count > 0: solvent_molecules.append(f"{'NA':<10} {na_count:>7}\n")
-            if cl_count > 0: solvent_molecules.append(f"{'CL':<10} {cl_count:>7}\n")
+                    r = line[5:10].strip()
+                    if r == "W": w_cnt += 1
+                    elif "NA" in r: na_cnt += 1
+                    elif "CL" in r: cl_cnt += 1
+            if w_cnt > 0: solvent_molecules.append(f"{'W':<10} {w_cnt:>7}\n")
+            if na_cnt > 0: solvent_molecules.append(f"{'NA':<10} {na_cnt:>7}\n")
+            if cl_cnt > 0: solvent_molecules.append(f"{'CL':<10} {cl_cnt:>7}\n")
 
         # ----------------------------------------------------------------------
-        # 6. Build the Unified system.top File
+        # 8. Unified system.top File
         # ----------------------------------------------------------------------
-        # Copy the required Martini ITP force fields into the workspace
-        for itp_file in ["martini_v2.1P-dna.itp", "martini_v2.0_ions.itp", "martini_v2.2.itp"]:
-            src_itp = cg_tools_dir / itp_file
-            if src_itp.exists():
-                shutil.copy(src_itp, wd / itp_file)
+        itp_to_copy = ["martini_v2.0_ions.itp", "martini_v2.2.itp"]
+        if is_rna:
+            itp_to_copy.append("martini_v2.1-dna.itp")
+            na_itp_include = '#include "martini_v2.1-dna.itp"\n'
+        else:
+            itp_to_copy.append("martini_v2.1P-dna.itp")
+            na_itp_include = '#include "martini_v2.1P-dna.itp"\n'
+
+        for itp in itp_to_copy:
+            if (cg_tools_dir / itp).exists():
+                shutil.copy(cg_tools_dir / itp, wd / itp)
 
         system_top_lines = [
-            '#include "martini_v2.1P-dna.itp"\n',
+            na_itp_include,
             '#include "martini_v2.0_ions.itp"\n\n',
             '#define RUBBER_BANDS\n\n',
             '#include "Protein_A.itp"\n',
             '#include "Nucleic_A.itp"\n\n',
             '[ system ]\n',
             '; name\n',
-            'Martini system from Protein-Nucleic\n\n',
+            f'Complex System ({mol_title})\n\n',
             '[ molecules ]\n',
             '; name        number\n',
             'Protein_A 	 1\n',
             'Nucleic_A        1\n'
         ]
-        # Append solvent and ions
         system_top_lines.extend(solvent_molecules)
 
-        system_top_path = wd / "system.top"
-        with open(system_top_path, "w") as f:
+        with open(wd / "system.top", "w") as f:
             f.writelines(system_top_lines)
 
         # ----------------------------------------------------------------------
-        # 7. Backward Mapping Reference (.map)
+        # 9. Backward Mapping Definition (.map)
         # ----------------------------------------------------------------------
-        map_lines = [
-            "; ===================================================\n",
-            "; Backward Mapping Definition for Nucleic Acid Aptamer\n",
-            "; ===================================================\n",
-            "[ molecule ]\n", "DNA_Aptamer\n\n",
-            "[ martini ]\n", "BB1 BB2 BB3 SC1 SC2 SC3 SC4\n\n",
-            "[ mapping ]\n", "charmm36\n\n",
-            "[ residues ]\n",
-            "DA     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4 (Library: da.charmm36.map)\n",
-            "DT     -> BB1 BB2 BB3 SC1 SC2 SC3     (Library: dt.charmm36.map)\n",
-            "DG     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4 (Library: dg.charmm36.map)\n",
-            "DC     -> BB1 BB2 BB3 SC1 SC2 SC3     (Library: dc.charmm36.map)\n"
-        ]
+        if is_rna:
+            map_content = """[ molecule ]
+RNA_Aptamer
+
+[ martini ]
+BB1 BB2 BB3 SC1 SC2 SC3 SC4
+
+[ mapping ]
+charmm36
+
+[ residues ]
+G      -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+A      -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+C      -> BB1 BB2 BB3 SC1 SC2 SC3
+U      -> BB1 BB2 BB3 SC1 SC2 SC3
+DG     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+DA     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+CFZ    -> BB1 BB2 BB3 SC1 SC2 SC3
+UMS    -> BB1 BB2 BB3 SC1 SC2 SC3
+UFT    -> BB1 BB2 BB3 SC1 SC2 SC3
+ADS    -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+"""
+        else:
+            map_content = """[ molecule ]
+DNA_Aptamer
+
+[ martini ]
+BB1 BB2 BB3 SC1 SC2 SC3 SC4
+
+[ mapping ]
+charmm36
+
+[ residues ]
+DG     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+DA     -> BB1 BB2 BB3 SC1 SC2 SC3 SC4
+DT     -> BB1 BB2 BB3 SC1 SC2 SC3
+DC     -> BB1 BB2 BB3 SC1 SC2 SC3
+"""
         with open(wd / "aptamer.map", "w") as f:
-            f.writelines(map_lines)
+            f.write(map_content)
 
         # ----------------------------------------------------------------------
-        # 8. Package All Files into complex_cg_prep.zip
+        # 10. Package Output Archive
         # ----------------------------------------------------------------------
         zip_path = wd / "complex_cg_prep.zip"
         files_to_zip = [
             "system.gro", "system.top", "complex_CG.gro", "protein_CG.gro",
             "aptamer_CG.gro", "protein_CG.pdb", "dna_CG.pdb", "dna.top",
-            "Protein_A.itp", "Nucleic_A.itp", "martini_v2.1P-dna.itp",
-            "martini_v2.0_ions.itp", "aptamer.map"
+            "Protein_A.itp", "Nucleic_A.itp", "martini_v2.0_ions.itp", "aptamer.map"
         ]
+        if is_rna:
+            files_to_zip.append("martini_v2.1-dna.itp")
+        else:
+            files_to_zip.append("martini_v2.1P-dna.itp")
+
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
             for fname in files_to_zip:
                 if (wd / fname).exists():
                     z.write(wd / fname, arcname=fname)
-            # Catch any other generated ITP files (e.g. elastic network rubber bands)
             for itp in wd.glob("*.itp"):
                 if itp.name not in files_to_zip:
                     z.write(itp, arcname=itp.name)
 
-        # Previews for Streamlit
-        top_preview = "".join(system_top_lines)
         gro_preview = ""
         if (wd / "system.gro").exists():
             with open(wd / "system.gro", "r") as f:
@@ -639,7 +744,7 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         return {
             "status": "success",
             "result_file": str(zip_path),
-            "sys_top_preview": top_preview,
+            "sys_top_preview": "".join(system_top_lines),
             "gro_preview": gro_preview
         }
     except subprocess.CalledProcessError as e:
