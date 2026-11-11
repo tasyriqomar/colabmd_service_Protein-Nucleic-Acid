@@ -1090,6 +1090,10 @@ U       RNA
             with open(wd / protein_pdb, "r") as f:
                 for line in f:
                     if line.startswith(("ATOM", "HETATM")):
+                        atom_name = line[12:16].strip()
+                        # Omit OXT so CHARMM36 pdb2gmx builds the carboxylate terminus natively
+                        if atom_name == "OXT":
+                            continue
                         clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
 
             clean_na_lines = []
@@ -1105,7 +1109,6 @@ U       RNA
                 f.writelines(clean_na_lines)
                 f.write("TER\nEND\n")
 
-            # Environment with GMXLIB pointing to wd for residuetypes.dat
             env = os.environ.copy()
             env["GMXLIB"] = str(wd)
 
