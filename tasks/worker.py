@@ -1031,7 +1031,6 @@ echo "Backmapping successfully completed!"
 """
 
 @celery_app.task
-@celery_app.task
 def run_backmapping_workflow(
     work_dir: str, protein_pdb: str, aptamer_pdb: str, xtc_file: str,
     tpr_file: str, mdp_file: str, ndx_file: str, system_gro: str,
@@ -1053,7 +1052,7 @@ def run_backmapping_workflow(
             ff_source = Path("/app/tools/Backmapping/charmm36.ff")
 
         if not ff_source.exists():
-            raise FileNotFoundError(f"Custom CHARMM36 force field not found in /app/tools/Backmapping/")
+            raise FileNotFoundError("Custom CHARMM36 force field not found in /app/tools/Backmapping/")
 
         target_ff_dir = wd / ff_source.name
         if not target_ff_dir.exists():
@@ -1061,23 +1060,38 @@ def run_backmapping_workflow(
 
         ff_name = ff_source.stem
 
-        # 3. Write executable initram-v5.sh
+        # 3. Inject local residuetypes.dat into the task working directory
+        res_types_content = """CFZ     RNA
+UFT     RNA
+UMS     RNA
+ADS     RNA
+DA      RNA
+DG      RNA
+DC      RNA
+DT      RNA
+A       RNA
+C       RNA
+G       RNA
+U       RNA
+"""
+        with open(wd / "residuetypes.dat", "w") as f:
+            f.write(res_types_content)
+
+        # 4. Write executable initram-v5.sh
         initram_path = wd / "initram-v5.sh"
         with open(initram_path, "w") as f:
             f.write(INITRAM_SCRIPT)
         subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        # 4. Generate All-Atom topol.top and aa.gro natively with modified charmm36
+        # 5. Generate All-Atom topol.top and aa.gro natively with modified charmm36
         topol_path = wd / "topol.top"
         if not topol_path.exists():
-            # A. Extract Chain A (Protein)
             clean_prot_lines = []
             with open(wd / protein_pdb, "r") as f:
                 for line in f:
                     if line.startswith(("ATOM", "HETATM")):
                         clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
 
-            # B. Extract Chain B (Nucleic Acid, preserving CFZ, UMS, UFT, ADS)
             clean_na_lines = []
             with open(wd / aptamer_pdb, "r") as f:
                 for line in f:
@@ -1091,7 +1105,10 @@ def run_backmapping_workflow(
                 f.writelines(clean_na_lines)
                 f.write("TER\nEND\n")
 
-            # Native CHARMM36 pdb2gmx execution
+            # Environment with GMXLIB pointing to wd for residuetypes.dat
+            env = os.environ.copy()
+            env["GMXLIB"] = str(wd)
+
             pdb2gmx_cmd = [
                 "gmx", "pdb2gmx",
                 "-f", "combined.pdb",
@@ -1104,6 +1121,7 @@ def run_backmapping_workflow(
             subprocess.run(
                 pdb2gmx_cmd,
                 cwd=wd,
+                env=env,
                 input="1\n1\n1\n1\n1\n",
                 capture_output=True,
                 text=True,
@@ -1111,13 +1129,13 @@ def run_backmapping_workflow(
                 check=True
             )
 
-        # 5. Output directories for trajectory reconstruction
+        # 6. Output directories for trajectory reconstruction
         out_xtc_dir = wd / "all_xtc"
         out_gro_dir = wd / "gro"
         out_xtc_dir.mkdir(exist_ok=True)
         out_gro_dir.mkdir(exist_ok=True)
 
-        # 6. Execute Backmapping loop natively
+        # 7. Execute Backmapping loop
         for i in range(loop_from, loop_until + 1):
             dump_time = f"{i}000"
             trj_gro = f"trj_{i}ns.gro"
@@ -1130,21 +1148,22 @@ def run_backmapping_workflow(
                 "-o", trj_gro, "-dump", dump_time
             ], cwd=wd, input=f"{solute_group}\n", capture_output=True, text=True, check=True)
 
-            env = os.environ.copy()
+            loop_env = os.environ.copy()
+            loop_env["GMXLIB"] = str(wd)
             if i == loop_from:
-                env["EM_STEPS"] = "3000"
-                env["NB_STEPS"] = "1000"
-                env["MD_STEPS"] = "500"
+                loop_env["EM_STEPS"] = "3000"
+                loop_env["NB_STEPS"] = "1000"
+                loop_env["MD_STEPS"] = "500"
             else:
-                env["EM_STEPS"] = "2000"
-                env["NB_STEPS"] = "0"
-                env["MD_STEPS"] = "0"
+                loop_env["EM_STEPS"] = "2000"
+                loop_env["NB_STEPS"] = "0"
+                loop_env["MD_STEPS"] = "0"
 
             # Execute backmapping projection using charmm36
             subprocess.run([
                 "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
                 "-to", "charmm36", "-p", "topol.top"
-            ], cwd=wd, env=env, capture_output=True, text=True, check=True)
+            ], cwd=wd, env=loop_env, capture_output=True, text=True, check=True)
 
             # Update Frame Header cleanly
             with open(wd / trj_gro, "r") as f:
@@ -1163,7 +1182,7 @@ def run_backmapping_workflow(
             shutil.copy(wd / aa_xtc, out_xtc_dir / aa_xtc)
             shutil.copy(wd / aa_gro, out_gro_dir / aa_gro)
 
-        # 7. Concatenate all generated XTC frames
+        # 8. Concatenate all generated XTC frames
         xtc_files = sorted([f.name for f in out_xtc_dir.glob("*.xtc")])
         if not xtc_files:
             return {"status": "failed", "message": "No all-atom XTC frames were produced."}
@@ -1171,7 +1190,7 @@ def run_backmapping_workflow(
         trjcat_cmd = ["gmx", "trjcat", "-f"] + xtc_files + ["-o", "combine.xtc"]
         subprocess.run(trjcat_cmd, cwd=out_xtc_dir, capture_output=True, text=True, check=True)
 
-        # 8. Assemble all-atomic dynamic.tpr
+        # 9. Assemble all-atomic dynamic.tpr
         earliest_gro = f"aa_{loop_from}ns.gro"
         source_gro = out_gro_dir / earliest_gro
         target_gro = wd / earliest_gro
@@ -1206,7 +1225,7 @@ def run_backmapping_workflow(
         subprocess.run(grompp_cmd, cwd=wd, capture_output=True, text=True, check=True)
         shutil.copy2(wd / "dynamic.tpr", out_xtc_dir / "dynamic.tpr")
 
-        # 9. Center-fit PBC and generate index.ndx + concatenated.pdb
+        # 10. Center-fit PBC and generate index.ndx + concatenated.pdb
         if (out_xtc_dir / "combine.xtc").exists() and (out_xtc_dir / "dynamic.tpr").exists():
             trjconv_pbc_cmd = [
                 "gmx", "trjconv",
@@ -1222,12 +1241,12 @@ def run_backmapping_workflow(
         subprocess.run(["gmx", "make_ndx", "-f", "dynamic.tpr", "-o", "index.ndx"], cwd=out_xtc_dir, input="q\n", capture_output=True, text=True, check=True)
         subprocess.run(["gmx", "trjconv", "-s", "dynamic.tpr", "-n", "index.ndx", "-f", "all.xtc", "-dt", "1000", "-o", "concatenated.pdb"], cwd=out_xtc_dir, input="0\n", capture_output=True, text=True, check=True)
 
-        # 10. Clean up intermediate frame files from the root directory
+        # 11. Clean up intermediate frame files from the root directory
         for f in wd.glob("aa_*ns.gro"): f.unlink()
         for f in wd.glob("aa_*ns.xtc"): f.unlink()
         for f in wd.glob("trj_*ns.gro"): f.unlink()
 
-        # 11. Package final output archive
+        # 12. Package final output archive
         zip_path = wd / "backmapped_results.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(out_xtc_dir):
