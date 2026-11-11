@@ -1091,9 +1091,15 @@ U       RNA
                 for line in f:
                     if line.startswith(("ATOM", "HETATM")):
                         atom_name = line[12:16].strip()
-                        # Omit OXT so CHARMM36 pdb2gmx builds the carboxylate terminus natively
-                        if atom_name == "OXT":
+
+                        # Skip secondary C-terminal oxygens so pdb2gmx builds COO- cleanly
+                        if atom_name in {"OXT", "OT2"}:
                             continue
+
+                        # If the terminal oxygen is named OT1, standardize it to O
+                        if atom_name == "OT1":
+                            line = f"{line[:12]} O   {line[17:]}"
+
                         clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
 
             clean_na_lines = []
