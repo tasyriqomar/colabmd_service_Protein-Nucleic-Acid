@@ -1046,7 +1046,7 @@ def run_backmapping_workflow(
         if aptamer_map and (wd / aptamer_map).exists():
             shutil.copy2(wd / aptamer_map, wd / "Mapping" / "aptamer.map")
 
-        # 2. Locate and copy the modified charmm36-jul2022.ff into work directory
+        # 2. Locate and copy CHARMM36 force field folder
         ff_source = Path("/app/tools/Backmapping/charmm36-jul2022.ff")
         if not ff_source.exists():
             ff_source = Path("/app/tools/Backmapping/charmm36.ff")
@@ -1060,8 +1060,136 @@ def run_backmapping_workflow(
 
         ff_name = ff_source.stem
 
-        # 3. Inject local residuetypes.dat into the task working directory
-        res_types_content = """CFZ     RNA
+        # ----------------------------------------------------------------------
+        # 3. Terminus Priority Enforcement in target_ff_dir (.tdb files)
+        # ----------------------------------------------------------------------
+        # A. aminoacids.n.tdb: [ NH3+ ] MUST be first
+        with open(target_ff_dir / "aminoacids.n.tdb", "w") as f:
+            f.write("""[ NH3+ ]
+; standard N-terminus
+[ delete ]
+ HN
+ HT1
+ HN1
+ HT2
+ HN2
+[ replace ]
+N      NH3       14.007000  -0.3000
+CA     CT1       12.011000   0.2100
+HA     HB1        1.008000   0.1000
+[ add ]
+3   4   H     N      CA     C     
+  HC         1.008000   0.3300  -1
+
+[ GLY-NH3+ ]
+; Glycine N-terminus
+[ delete ]
+ HN
+ HT1
+ HN1
+ HT2
+ HN2
+[ replace ]
+N      NH3       14.007000  -0.3000
+CA     CT2       12.011000   0.1300
+[ add ]
+3   4   H     N      CA     C     
+  HC         1.008000   0.3300  -1
+
+[ PRO-NH2+ ]
+; Proline N-Terminal
+[ delete ]
+ HT1
+ H3
+ HT2
+ H2
+ H1
+[ replace ]
+N      NP        14.007000  -0.0700
+CD     CP3       12.011000   0.1600
+CA     CP1       12.011000   0.1600
+[ add ]
+2   6   HN    N      CA     CD    
+  HC         1.008000   0.2400  -1
+
+[ None ]
+; Empty, do-nothing terminus
+""")
+
+        # B. aminoacids.c.tdb: [ COO- ] MUST be first
+        with open(target_ff_dir / "aminoacids.c.tdb", "w") as f:
+            f.write("""[ COO- ]
+; standard C-terminus
+[ delete ]
+ O
+ NT
+ HT3
+ HT1
+ CT
+ OXT
+ HT2
+[ replace ]
+C      CC        12.011000   0.3400
+[ add ]
+2   8   OT    C      CA     N     
+  OC        15.999400  -0.6700  -1
+[ impropers ]
+C      CA     OT2    OT1   
+
+[ None ]
+; Empty, do-nothing terminus
+""")
+
+        # C. na.n.tdb: [ 5TER ] MUST be first
+        with open(target_ff_dir / "na.n.tdb", "w") as f:
+            f.write("""[ 5TER ]
+; 5'-terminal HYDROXYL patch
+[ delete ]
+ P
+ O1P
+ O2P
+ H5T1
+ H5T2
+ C5T
+ H53'
+ H5T3
+ O5T
+[ replace ]
+O5'    ON5       15.999400  -0.6600
+C5'    CN8B      12.011000   0.0500
+[ add ]
+1   2   H5T   O5'    C5'    C4'   
+  HN5        1.008000   0.4300  -1
+
+[ None ]
+; Empty, do-nothing terminus
+""")
+
+        # D. na.c.tdb: [ 3TER ] MUST be first
+        with open(target_ff_dir / "na.c.tdb", "w") as f:
+            f.write("""[ 3TER ]
+; 3'terminal HYDROXYL patch
+[ replace ]
+C3'    CN7       12.011000   0.1400
+O3'    ON5       15.999400  -0.6600
+[ add ]
+1   2   H3T   O3'    C3'    C2'   
+  HN5        1.008000   0.4300  -1
+
+[ None ]
+; Empty, do-nothing terminus
+""")
+
+        # E. aminoacids.arn: Standard definition
+        with open(target_ff_dir / "aminoacids.arn", "w") as f:
+            f.write("""; atom renaming specification
+; residue gromacs    forcefield
+*          H          HN        
+""")
+
+        # F. residuetypes.dat in working directory
+        with open(wd / "residuetypes.dat", "w") as f:
+            f.write("""CFZ     RNA
 UFT     RNA
 UMS     RNA
 ADS     RNA
@@ -1073,9 +1201,7 @@ A       RNA
 C       RNA
 G       RNA
 U       RNA
-"""
-        with open(wd / "residuetypes.dat", "w") as f:
-            f.write(res_types_content)
+""")
 
         # 4. Write executable initram-v5.sh
         initram_path = wd / "initram-v5.sh"
@@ -1083,7 +1209,9 @@ U       RNA
             f.write(INITRAM_SCRIPT)
         subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        # 5. Generate All-Atom topol.top and aa.gro natively with modified charmm36
+        # ----------------------------------------------------------------------
+        # 5. Assemble combined.pdb and Execute pdb2gmx
+        # ----------------------------------------------------------------------
         topol_path = wd / "topol.top"
         if not topol_path.exists():
             clean_prot_lines = []
@@ -1091,15 +1219,11 @@ U       RNA
                 for line in f:
                     if line.startswith(("ATOM", "HETATM")):
                         atom_name = line[12:16].strip()
-
-                        # Skip secondary C-terminal oxygens so pdb2gmx builds COO- cleanly
+                        # Skip secondary carboxylate oxygens (OXT / OT2)
                         if atom_name in {"OXT", "OT2"}:
                             continue
-
-                        # If the terminal oxygen is named OT1, standardize it to O
                         if atom_name == "OT1":
                             line = f"{line[:12]} O   {line[17:]}"
-
                         clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
 
             clean_na_lines = []
@@ -1131,7 +1255,6 @@ U       RNA
                 pdb2gmx_cmd,
                 cwd=wd,
                 env=env,
-                input="1\n1\n1\n1\n1\n",
                 capture_output=True,
                 text=True,
                 timeout=180,
