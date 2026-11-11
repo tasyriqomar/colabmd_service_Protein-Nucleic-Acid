@@ -1031,6 +1031,7 @@ echo "Backmapping successfully completed!"
 """
 
 @celery_app.task
+@celery_app.task
 def run_backmapping_workflow(
     work_dir: str, protein_pdb: str, aptamer_pdb: str, xtc_file: str,
     tpr_file: str, mdp_file: str, ndx_file: str, system_gro: str,
@@ -1039,21 +1040,26 @@ def run_backmapping_workflow(
 ):
     wd = Path(work_dir)
     try:
-        # 1. Prepare environment tools and mapping library
+        # 1. Copy Backmapping scripts and Mapping library
         shutil.copy("/app/tools/Backmapping/backward.py", wd / "backward.py")
         shutil.copytree("/app/tools/Backmapping/Mapping", wd / "Mapping", dirs_exist_ok=True)
 
         if aptamer_map and (wd / aptamer_map).exists():
             shutil.copy2(wd / aptamer_map, wd / "Mapping" / "aptamer.map")
 
-        # 2. Locate and copy available forcefield folder (.ff) into the working directory
-        ff_candidates = list(Path("/app/tools/Backmapping").glob("*.ff")) + list(Path("/app/tools").glob("*.ff"))
-        ff_name = "charmm36"
-        if ff_candidates:
-            target_ff = ff_candidates[0]
-            ff_name = target_ff.stem
-            if not (wd / target_ff.name).exists():
-                shutil.copytree(target_ff, wd / target_ff.name)
+        # 2. Locate and copy the modified charmm36-jul2022.ff into work directory
+        ff_source = Path("/app/tools/Backmapping/charmm36-jul2022.ff")
+        if not ff_source.exists():
+            ff_source = Path("/app/tools/Backmapping/charmm36.ff")
+
+        if not ff_source.exists():
+            raise FileNotFoundError(f"Custom CHARMM36 force field not found in /app/tools/Backmapping/")
+
+        target_ff_dir = wd / ff_source.name
+        if not target_ff_dir.exists():
+            shutil.copytree(ff_source, target_ff_dir)
+
+        ff_name = ff_source.stem
 
         # 3. Write executable initram-v5.sh
         initram_path = wd / "initram-v5.sh"
@@ -1061,16 +1067,31 @@ def run_backmapping_workflow(
             f.write(INITRAM_SCRIPT)
         subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        # 4. Generate All-Atom topol.top and aa.gro non-interactively
+        # 4. Generate All-Atom topol.top and aa.gro natively with modified charmm36
         topol_path = wd / "topol.top"
         if not topol_path.exists():
-            subprocess.run(
-                f'cat {protein_pdb} {aptamer_pdb} | grep -v -E "TITLE|MODEL|ENDMDL|CRYST1|REMARK|END" > combined.pdb',
-                shell=True, cwd=wd, check=True
-            )
-            subprocess.run('echo "END" >> combined.pdb', shell=True, cwd=wd, check=True)
-            
-            # Use explicit -water and -ff to prevent stdin blocking loops
+            # A. Extract Chain A (Protein)
+            clean_prot_lines = []
+            with open(wd / protein_pdb, "r") as f:
+                for line in f:
+                    if line.startswith(("ATOM", "HETATM")):
+                        clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
+
+            # B. Extract Chain B (Nucleic Acid, preserving CFZ, UMS, UFT, ADS)
+            clean_na_lines = []
+            with open(wd / aptamer_pdb, "r") as f:
+                for line in f:
+                    if line.startswith(("ATOM", "HETATM")):
+                        clean_na_lines.append(f"{line[:21]}B{line[22:]}")
+
+            combined_pdb = wd / "combined.pdb"
+            with open(combined_pdb, "w") as f:
+                f.writelines(clean_prot_lines)
+                f.write("TER\n")
+                f.writelines(clean_na_lines)
+                f.write("TER\nEND\n")
+
+            # Native CHARMM36 pdb2gmx execution
             pdb2gmx_cmd = [
                 "gmx", "pdb2gmx",
                 "-f", "combined.pdb",
@@ -1080,57 +1101,35 @@ def run_backmapping_workflow(
                 "-water", "tip3p",
                 "-ignh"
             ]
-            try:
-                subprocess.run(
-                    pdb2gmx_cmd,
-                    cwd=wd,
-                    input="1\n1\n1\n1\n1\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=True
-                )
-            except subprocess.CalledProcessError:
-                # Fallback to amber99sb-ildn if the custom charmm folder is unavailable
-                fallback_cmd = [
-                    "gmx", "pdb2gmx",
-                    "-f", "combined.pdb",
-                    "-o", "aa.gro",
-                    "-p", "topol.top",
-                    "-ff", "amber99sb-ildn",
-                    "-water", "tip3p",
-                    "-ignh"
-                ]
-                subprocess.run(
-                    fallback_cmd,
-                    cwd=wd,
-                    input="1\n1\n1\n1\n1\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=True
-                )
+            subprocess.run(
+                pdb2gmx_cmd,
+                cwd=wd,
+                input="1\n1\n1\n1\n1\n",
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=True
+            )
 
-        # 5. Prepare output directories
+        # 5. Output directories for trajectory reconstruction
         out_xtc_dir = wd / "all_xtc"
         out_gro_dir = wd / "gro"
         out_xtc_dir.mkdir(exist_ok=True)
         out_gro_dir.mkdir(exist_ok=True)
 
-        # 6. Execute Backmapping loop natively in Python
+        # 6. Execute Backmapping loop natively
         for i in range(loop_from, loop_until + 1):
             dump_time = f"{i}000"
             trj_gro = f"trj_{i}ns.gro"
             aa_gro = f"aa_{i}ns.gro"
             aa_xtc = f"aa_{i}ns.xtc"
 
-            # Extract CG frame from dynamic_fitted.xtc using system.gro
+            # Extract CG frame from dynamic_fitted.xtc
             subprocess.run([
                 "gmx", "trjconv", "-f", xtc_file, "-s", system_gro, "-n", ndx_file,
                 "-o", trj_gro, "-dump", dump_time
             ], cwd=wd, input=f"{solute_group}\n", capture_output=True, text=True, check=True)
 
-            # Control simulated annealing steps through environment variables
             env = os.environ.copy()
             if i == loop_from:
                 env["EM_STEPS"] = "3000"
@@ -1141,7 +1140,7 @@ def run_backmapping_workflow(
                 env["NB_STEPS"] = "0"
                 env["MD_STEPS"] = "0"
 
-            # Execute backmapping projection via initram-v5
+            # Execute backmapping projection using charmm36
             subprocess.run([
                 "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
                 "-to", "charmm36", "-p", "topol.top"
@@ -1156,7 +1155,7 @@ def run_backmapping_workflow(
             with open(wd / aa_gro, "w") as f:
                 f.writelines(aa_lines)
 
-            # Convert Frame GRO to XTC (pipe '0' for System selection)
+            # Convert Frame GRO to XTC
             subprocess.run([
                 "gmx", "trjconv", "-f", aa_gro, "-o", aa_xtc
             ], cwd=wd, input="0\n", capture_output=True, text=True, check=True)
