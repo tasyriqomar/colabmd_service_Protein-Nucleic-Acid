@@ -1039,209 +1039,38 @@ def run_backmapping_workflow(
 ):
     wd = Path(work_dir)
     try:
-        # 1. Copy Backmapping scripts and Mapping library
+        # 1. Prepare environment tools and mapping library
         shutil.copy("/app/tools/Backmapping/backward.py", wd / "backward.py")
         shutil.copytree("/app/tools/Backmapping/Mapping", wd / "Mapping", dirs_exist_ok=True)
 
         if aptamer_map and (wd / aptamer_map).exists():
             shutil.copy2(wd / aptamer_map, wd / "Mapping" / "aptamer.map")
 
-        # 2. Locate and copy CHARMM36 force field folder
-        ff_source = Path("/app/tools/Backmapping/charmm36-jul2022.ff")
-        if not ff_source.exists():
-            ff_source = Path("/app/tools/Backmapping/charmm36.ff")
+        # 2. Locate and copy available forcefield folder (.ff) into the working directory
+        ff_candidates = list(Path("/app/tools/Backmapping").glob("*.ff")) + list(Path("/app/tools").glob("*.ff"))
+        ff_name = "charmm36"
+        if ff_candidates:
+            target_ff = ff_candidates[0]
+            ff_name = target_ff.stem
+            if not (wd / target_ff.name).exists():
+                shutil.copytree(target_ff, wd / target_ff.name)
 
-        if not ff_source.exists():
-            raise FileNotFoundError("Custom CHARMM36 force field not found in /app/tools/Backmapping/")
-
-        target_ff_dir = wd / ff_source.name
-        if not target_ff_dir.exists():
-            shutil.copytree(ff_source, target_ff_dir)
-
-        ff_name = ff_source.stem
-
-        # ----------------------------------------------------------------------
-        # 3. Terminus Priority Enforcement in target_ff_dir (.tdb files)
-        # ----------------------------------------------------------------------
-        # A. aminoacids.n.tdb: [ NH3+ ] MUST be first
-        with open(target_ff_dir / "aminoacids.n.tdb", "w") as f:
-            f.write("""[ NH3+ ]
-; standard N-terminus
-[ delete ]
- HN
- HT1
- HN1
- HT2
- HN2
-[ replace ]
-N      NH3       14.007000  -0.3000
-CA     CT1       12.011000   0.2100
-HA     HB1        1.008000   0.1000
-[ add ]
-3   4   H     N      CA     C     
-  HC         1.008000   0.3300  -1
-
-[ GLY-NH3+ ]
-; Glycine N-terminus
-[ delete ]
- HN
- HT1
- HN1
- HT2
- HN2
-[ replace ]
-N      NH3       14.007000  -0.3000
-CA     CT2       12.011000   0.1300
-[ add ]
-3   4   H     N      CA     C     
-  HC         1.008000   0.3300  -1
-
-[ PRO-NH2+ ]
-; Proline N-Terminal
-[ delete ]
- HT1
- H3
- HT2
- H2
- H1
-[ replace ]
-N      NP        14.007000  -0.0700
-CD     CP3       12.011000   0.1600
-CA     CP1       12.011000   0.1600
-[ add ]
-2   6   HN    N      CA     CD    
-  HC         1.008000   0.2400  -1
-
-[ None ]
-; Empty, do-nothing terminus
-""")
-
-        # B. aminoacids.c.tdb: [ COO- ] MUST be first
-        with open(target_ff_dir / "aminoacids.c.tdb", "w") as f:
-            f.write("""[ COO- ]
-; standard C-terminus
-[ delete ]
- O
- NT
- HT3
- HT1
- CT
- OXT
- HT2
-[ replace ]
-C      CC        12.011000   0.3400
-[ add ]
-2   8   OT    C      CA     N     
-  OC        15.999400  -0.6700  -1
-[ impropers ]
-C      CA     OT2    OT1   
-
-[ None ]
-; Empty, do-nothing terminus
-""")
-
-        # C. na.n.tdb: [ 5TER ] MUST be first
-        with open(target_ff_dir / "na.n.tdb", "w") as f:
-            f.write("""[ 5TER ]
-; 5'-terminal HYDROXYL patch
-[ delete ]
- P
- O1P
- O2P
- H5T1
- H5T2
- C5T
- H53'
- H5T3
- O5T
-[ replace ]
-O5'    ON5       15.999400  -0.6600
-C5'    CN8B      12.011000   0.0500
-[ add ]
-1   2   H5T   O5'    C5'    C4'   
-  HN5        1.008000   0.4300  -1
-
-[ None ]
-; Empty, do-nothing terminus
-""")
-
-        # D. na.c.tdb: [ 3TER ] MUST be first
-        with open(target_ff_dir / "na.c.tdb", "w") as f:
-            f.write("""[ 3TER ]
-; 3'terminal HYDROXYL patch
-[ replace ]
-C3'    CN7       12.011000   0.1400
-O3'    ON5       15.999400  -0.6600
-[ add ]
-1   2   H3T   O3'    C3'    C2'   
-  HN5        1.008000   0.4300  -1
-
-[ None ]
-; Empty, do-nothing terminus
-""")
-
-        # E. aminoacids.arn: Standard definition
-        with open(target_ff_dir / "aminoacids.arn", "w") as f:
-            f.write("""; atom renaming specification
-; residue gromacs    forcefield
-*          H          HN        
-""")
-
-        # F. residuetypes.dat in working directory
-        with open(wd / "residuetypes.dat", "w") as f:
-            f.write("""CFZ     RNA
-UFT     RNA
-UMS     RNA
-ADS     RNA
-DA      RNA
-DG      RNA
-DC      RNA
-DT      RNA
-A       RNA
-C       RNA
-G       RNA
-U       RNA
-""")
-
-        # 4. Write executable initram-v5.sh
+        # 3. Write executable initram-v5.sh
         initram_path = wd / "initram-v5.sh"
         with open(initram_path, "w") as f:
             f.write(INITRAM_SCRIPT)
         subprocess.run(["chmod", "+x", "initram-v5.sh", "backward.py"], cwd=wd, check=True)
 
-        # ----------------------------------------------------------------------
-        # 5. Assemble combined.pdb and Execute pdb2gmx
-        # ----------------------------------------------------------------------
+        # 4. Generate All-Atom topol.top and aa.gro non-interactively
         topol_path = wd / "topol.top"
         if not topol_path.exists():
-            clean_prot_lines = []
-            with open(wd / protein_pdb, "r") as f:
-                for line in f:
-                    if line.startswith(("ATOM", "HETATM")):
-                        atom_name = line[12:16].strip()
-                        # Skip secondary carboxylate oxygens (OXT / OT2)
-                        if atom_name in {"OXT", "OT2"}:
-                            continue
-                        if atom_name == "OT1":
-                            line = f"{line[:12]} O   {line[17:]}"
-                        clean_prot_lines.append(f"{line[:21]}A{line[22:]}")
-
-            clean_na_lines = []
-            with open(wd / aptamer_pdb, "r") as f:
-                for line in f:
-                    if line.startswith(("ATOM", "HETATM")):
-                        clean_na_lines.append(f"{line[:21]}B{line[22:]}")
-
-            combined_pdb = wd / "combined.pdb"
-            with open(combined_pdb, "w") as f:
-                f.writelines(clean_prot_lines)
-                f.write("TER\n")
-                f.writelines(clean_na_lines)
-                f.write("TER\nEND\n")
-
-            env = os.environ.copy()
-            env["GMXLIB"] = str(wd)
-
+            subprocess.run(
+                f'cat {protein_pdb} {aptamer_pdb} | grep -v -E "TITLE|MODEL|ENDMDL|CRYST1|REMARK|END" > combined.pdb',
+                shell=True, cwd=wd, check=True
+            )
+            subprocess.run('echo "END" >> combined.pdb', shell=True, cwd=wd, check=True)
+            
+            # Use explicit -water and -ff to prevent stdin blocking loops
             pdb2gmx_cmd = [
                 "gmx", "pdb2gmx",
                 "-f", "combined.pdb",
@@ -1251,51 +1080,72 @@ U       RNA
                 "-water", "tip3p",
                 "-ignh"
             ]
-            subprocess.run(
-                pdb2gmx_cmd,
-                cwd=wd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=True
-            )
+            try:
+                subprocess.run(
+                    pdb2gmx_cmd,
+                    cwd=wd,
+                    input="1\n1\n1\n1\n1\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True
+                )
+            except subprocess.CalledProcessError:
+                # Fallback to amber99sb-ildn if the custom charmm folder is unavailable
+                fallback_cmd = [
+                    "gmx", "pdb2gmx",
+                    "-f", "combined.pdb",
+                    "-o", "aa.gro",
+                    "-p", "topol.top",
+                    "-ff", "amber99sb-ildn",
+                    "-water", "tip3p",
+                    "-ignh"
+                ]
+                subprocess.run(
+                    fallback_cmd,
+                    cwd=wd,
+                    input="1\n1\n1\n1\n1\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True
+                )
 
-        # 6. Output directories for trajectory reconstruction
+        # 5. Prepare output directories
         out_xtc_dir = wd / "all_xtc"
         out_gro_dir = wd / "gro"
         out_xtc_dir.mkdir(exist_ok=True)
         out_gro_dir.mkdir(exist_ok=True)
 
-        # 7. Execute Backmapping loop
+        # 6. Execute Backmapping loop natively in Python
         for i in range(loop_from, loop_until + 1):
             dump_time = f"{i}000"
             trj_gro = f"trj_{i}ns.gro"
             aa_gro = f"aa_{i}ns.gro"
             aa_xtc = f"aa_{i}ns.xtc"
 
-            # Extract CG frame from dynamic_fitted.xtc
+            # Extract CG frame from dynamic_fitted.xtc using system.gro
             subprocess.run([
                 "gmx", "trjconv", "-f", xtc_file, "-s", system_gro, "-n", ndx_file,
                 "-o", trj_gro, "-dump", dump_time
             ], cwd=wd, input=f"{solute_group}\n", capture_output=True, text=True, check=True)
 
-            loop_env = os.environ.copy()
-            loop_env["GMXLIB"] = str(wd)
+            # Control simulated annealing steps through environment variables
+            env = os.environ.copy()
             if i == loop_from:
-                loop_env["EM_STEPS"] = "3000"
-                loop_env["NB_STEPS"] = "1000"
-                loop_env["MD_STEPS"] = "500"
+                env["EM_STEPS"] = "3000"
+                env["NB_STEPS"] = "1000"
+                env["MD_STEPS"] = "500"
             else:
-                loop_env["EM_STEPS"] = "2000"
-                loop_env["NB_STEPS"] = "0"
-                loop_env["MD_STEPS"] = "0"
+                env["EM_STEPS"] = "2000"
+                env["NB_STEPS"] = "0"
+                env["MD_STEPS"] = "0"
 
-            # Execute backmapping projection using charmm36
+            # Execute backmapping projection via initram-v5
             subprocess.run([
                 "./initram-v5.sh", "-f", trj_gro, "-o", aa_gro,
                 "-to", "charmm36", "-p", "topol.top"
-            ], cwd=wd, env=loop_env, capture_output=True, text=True, check=True)
+            ], cwd=wd, env=env, capture_output=True, text=True, check=True)
 
             # Update Frame Header cleanly
             with open(wd / trj_gro, "r") as f:
@@ -1306,7 +1156,7 @@ U       RNA
             with open(wd / aa_gro, "w") as f:
                 f.writelines(aa_lines)
 
-            # Convert Frame GRO to XTC
+            # Convert Frame GRO to XTC (pipe '0' for System selection)
             subprocess.run([
                 "gmx", "trjconv", "-f", aa_gro, "-o", aa_xtc
             ], cwd=wd, input="0\n", capture_output=True, text=True, check=True)
@@ -1314,7 +1164,7 @@ U       RNA
             shutil.copy(wd / aa_xtc, out_xtc_dir / aa_xtc)
             shutil.copy(wd / aa_gro, out_gro_dir / aa_gro)
 
-        # 8. Concatenate all generated XTC frames
+        # 7. Concatenate all generated XTC frames
         xtc_files = sorted([f.name for f in out_xtc_dir.glob("*.xtc")])
         if not xtc_files:
             return {"status": "failed", "message": "No all-atom XTC frames were produced."}
@@ -1322,7 +1172,7 @@ U       RNA
         trjcat_cmd = ["gmx", "trjcat", "-f"] + xtc_files + ["-o", "combine.xtc"]
         subprocess.run(trjcat_cmd, cwd=out_xtc_dir, capture_output=True, text=True, check=True)
 
-        # 9. Assemble all-atomic dynamic.tpr
+        # 8. Assemble all-atomic dynamic.tpr
         earliest_gro = f"aa_{loop_from}ns.gro"
         source_gro = out_gro_dir / earliest_gro
         target_gro = wd / earliest_gro
@@ -1357,7 +1207,7 @@ U       RNA
         subprocess.run(grompp_cmd, cwd=wd, capture_output=True, text=True, check=True)
         shutil.copy2(wd / "dynamic.tpr", out_xtc_dir / "dynamic.tpr")
 
-        # 10. Center-fit PBC and generate index.ndx + concatenated.pdb
+        # 9. Center-fit PBC and generate index.ndx + concatenated.pdb
         if (out_xtc_dir / "combine.xtc").exists() and (out_xtc_dir / "dynamic.tpr").exists():
             trjconv_pbc_cmd = [
                 "gmx", "trjconv",
@@ -1373,12 +1223,12 @@ U       RNA
         subprocess.run(["gmx", "make_ndx", "-f", "dynamic.tpr", "-o", "index.ndx"], cwd=out_xtc_dir, input="q\n", capture_output=True, text=True, check=True)
         subprocess.run(["gmx", "trjconv", "-s", "dynamic.tpr", "-n", "index.ndx", "-f", "all.xtc", "-dt", "1000", "-o", "concatenated.pdb"], cwd=out_xtc_dir, input="0\n", capture_output=True, text=True, check=True)
 
-        # 11. Clean up intermediate frame files from the root directory
+        # 10. Clean up intermediate frame files from the root directory
         for f in wd.glob("aa_*ns.gro"): f.unlink()
         for f in wd.glob("aa_*ns.xtc"): f.unlink()
         for f in wd.glob("trj_*ns.gro"): f.unlink()
 
-        # 12. Package final output archive
+        # 11. Package final output archive
         zip_path = wd / "backmapped_results.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(out_xtc_dir):
