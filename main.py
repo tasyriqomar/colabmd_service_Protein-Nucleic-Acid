@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from celery.result import AsyncResult
 from pathlib import Path
 from typing import Optional
+import shutil
 import uuid
 import os
 
@@ -32,6 +34,37 @@ app.add_middleware(
 
 SHARED_DATA = Path("/app/shared_data")
 SHARED_DATA.mkdir(parents=True, exist_ok=True)
+
+router = APIRouter()
+
+class CleanupRequest(BaseModel):
+    username: str
+    tabs: list[int] = [1, 3, 4]
+    task_ids: list[str] = []
+
+@router.post("/cleanup-workspace")
+def cleanup_workspace(req: CleanupRequest):
+    # 1. Terminate any lingering Celery tasks so worker slots (--concurrency=2) are freed
+    for tid in req.task_ids:
+        celery_app.control.revoke(tid, terminate=True, signal="SIGKILL")
+
+    # 2. Remove Tab 1, 3, 4 artifacts for this user in shared_data
+    base_dir = os.path.join("/app/shared_data", req.username)
+    tab_folders = {
+        1: ["tab1", "preparation"],
+        3: ["tab3", "cgmd_setup"],
+        4: ["tab4", "simulation", "cgmd_run"],
+    }
+
+    deleted = []
+    for tab in req.tabs:
+        for folder in tab_folders.get(tab, []):
+            target = os.path.join(base_dir, folder)
+            if os.path.exists(target):
+                shutil.rmtree(target, ignore_errors=True)
+                deleted.append(target)
+
+    return {"status": "cleaned", "deleted": deleted}
 
 @app.get("/api/v1/status/{task_id}")
 def get_status(task_id: str):
