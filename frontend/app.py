@@ -82,6 +82,43 @@ with st.sidebar:
         st.session_state.authenticated = False
         st.session_state.current_user = None
         st.rerun()
+    
+    st.divider()
+
+    if st.button("🔄 Restart (Clear Tabs 1, 3 & 4)", use_container_width=True):
+        # 1. Collect any active/completed task IDs so the backend can revoke/clean them
+        task_ids = [
+            st.session_state.get("tab1_task_id"),
+            st.session_state.get("tab3_task_id"),
+            st.session_state.get("tab4_task_id"),
+        ]
+        task_ids = [tid for tid in task_ids if tid]
+
+        # 2. Tell the FastAPI backend to delete Tab 1, 3, 4 files in shared_data & revoke tasks
+        api_url = st.session_state.get("api_url")
+        username = st.session_state.get("username")
+        if api_url and username:
+            try:
+                requests.post(
+                    f"{api_url}/cleanup-workspace",
+                    json={"username": username, "tabs": [1, 3, 4], "task_ids": task_ids},
+                    timeout=10,
+                )
+            except Exception as e:
+                st.warning(f"Backend cleanup warning: {e}")
+
+        # 3. Preserve login & connection keys; wipe everything else (Tabs 1, 3, 4 data/flags)
+        preserve_keys = {"logged_in", "authenticated", "username", "token", "api_url"}
+        for key in list(st.session_state.keys()):
+            if key not in preserve_keys:
+                del st.session_state[key]
+
+        st.success("Tabs 1, 3, and 4 data cleared.")
+        st.rerun()
+
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
 # ==========================================
 # 4. STATE PERSISTENCE
