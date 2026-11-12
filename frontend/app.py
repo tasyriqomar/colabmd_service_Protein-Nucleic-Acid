@@ -205,6 +205,7 @@ with tab3:
     st.markdown("Perform macromolecular docking between the protein receptor and nucleic acid aptamer.")
     
     st.info("💡 **Don't have a protein structure?** Generate one using [AlphaFold2.ipynb](https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2.ipynb#scrollTo=G4yBrceuFbf3)")
+    st.info("💡 **Renumber residue numbers in PDB file?** Revise PDB using [www.canoz.com](https://www.canoz.com/sdh/renumberpdbchain.pl)")
     st.markdown("---")
     
     c1, c2 = st.columns(2)
