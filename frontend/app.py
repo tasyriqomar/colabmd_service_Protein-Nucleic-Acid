@@ -161,7 +161,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
 # ------------------------------------------
 with tab1:
     st.header("Step 1: Aptamer Processing")
-    st.markdown("Convert RNA structures to DNA (`rna_to_dna_with_methyl.py`) and rename residues for GROMACS parameterization.")
+    st.markdown("Prepare DNA or RNA aptamer structures (optional RNA-to-DNA conversion via `rna_to_dna_with_methyl.py`) and rename residues for GROMACS parameterization.")
     
     st.info("💡 **Don't have a 3D structure yet?**")
     st.markdown("""
@@ -171,13 +171,32 @@ with tab1:
     st.markdown("---")
         
     aptamer_file = st.file_uploader("Upload Aptamer Structure (PDB)", type=["pdb"], key="apt_upload")
-    convert_rna = st.checkbox("Convert RNA (Uracil) to DNA (Thymine)", value=True)
+    
+    aptamer_type = st.radio(
+        "Select Aptamer Nucleic Acid Type:",
+        options=["DNA", "RNA"],
+        index=0,
+        horizontal=True,
+        help="Select RNA if your aptamer contains Uracil (U) and ribose sugars, or DNA for Thymine (T) and deoxyribose sugars."
+    )
+    st.session_state["aptamer_type"] = aptamer_type
+
+    if aptamer_type == "DNA":
+        convert_rna = st.checkbox("Convert RNA (Uracil) to DNA (Thymine)", value=True)
+    else:
+        convert_rna = False
     
     if st.button("Process Aptamer PDB") and aptamer_file:
         st.session_state.aptamer_bytes = None
         with st.spinner("Processing Aptamer on Colab..."):
             files = {"aptamer_pdb": (aptamer_file.name, aptamer_file.getvalue(), "chemical/x-pdb")}
-            data = {"convert_rna": convert_rna}
+            data = {
+                "aptamer_type": aptamer_type,
+                "convert_rna": convert_rna,
+            }
+            if st.session_state.get("session_id"):
+                data["session_id"] = st.session_state["session_id"]
+
             try:
                 res = requests.post(f"{API_URL}/run-aptamer", files=files, data=data)
                 if res.status_code == 200:
@@ -192,7 +211,7 @@ with tab1:
                                 dl = requests.get(f"{API_URL}/download-prep-result/{task_id}")
                                 if dl.status_code == 200:
                                     st.session_state.aptamer_bytes = dl.content
-                                    status_ph.success("✅ Aptamer processed successfully!")
+                                    status_ph.success(f"✅ {aptamer_type} Aptamer processed successfully!")
                                     time.sleep(1)
                                     st.rerun()
                             break
