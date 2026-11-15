@@ -22,57 +22,8 @@ celery_app = Celery(
 # ==============================================================================
 # TAB 1: APTAMER PREP
 # ==============================================================================
-def clean_aptamer_pdb(input_pdb: str, output_pdb: str, aptamer_type: str = "DNA"):
-    """
-    Standardizes residue and atom naming for DNA or RNA aptamers.
-    Ensures prime notation (') is used instead of asterisks (*).
-    """
-    dna_map = {
-        "A": "DA", "T": "DT", "U": "DT", "G": "DG", "C": "DC",
-        "DA": "DA", "DT": "DT", "DG": "DG", "DC": "DC",
-        "RA": "DA", "RU": "DT", "RG": "DG", "RC": "DC",
-    }
-    rna_map = {
-        "A": "A", "U": "U", "G": "G", "C": "C",
-        "RA": "A", "RU": "U", "RG": "G", "RC": "C",
-    }
-
-    with open(input_pdb, "r") as infile, open(output_pdb, "w") as outfile:
-        for line in infile:
-            if not line.startswith(("ATOM", "HETATM")):
-                continue
-
-            res_name = line[17:20].strip()
-            atom_name = line[12:16].strip()
-
-            # Standardize sugar atom names (replace * with ')
-            if "*" in atom_name:
-                atom_name = atom_name.replace("*", "'")
-
-            if aptamer_type.upper() == "DNA":
-                # Strip 2'-hydroxyl if an RNA structure was loaded as DNA
-                if atom_name in ["O2'", "HO2'"]:
-                    continue
-                # Map to DA, DT, DC, DG
-                new_res = dna_map.get(res_name, res_name)
-            else:
-                # RNA processing: preserve O2' and keep A, U, G, C intact
-                new_res = rna_map.get(res_name, res_name)
-
-            # Reconstruct PDB record line
-            atom_formatted = f" {atom_name:<3}" if len(atom_name) < 4 else f"{atom_name:<4}"
-            res_formatted = f"{new_res:>3}"
-            new_line = line[:12] + atom_formatted + " " + res_formatted + line[20:]
-            outfile.write(new_line)
-
-
 @celery_app.task
-def run_aptamer_task(
-    work_dir: str,
-    aptamer_pdb_content: bytes,
-    convert_rna: bool = True,
-    aptamer_type: str = "DNA",
-):
+def run_aptamer_task(work_dir: str, aptamer_pdb_content: bytes, convert_rna: bool):
     wd = Path(work_dir)
     wd.mkdir(parents=True, exist_ok=True)
     try:
@@ -82,40 +33,20 @@ def run_aptamer_task(
         with open(wd / "aptamer.pdb", "wb") as f:
             f.write(aptamer_pdb_content)
 
-        fixed_pdb = wd / "aptamer_fixed.pdb"
+        shutil.copy("/app/tools/Aptamer-Processing/rna_to_dna_with_methyl.py", wd / "rna_to_dna_with_methyl.py")
+        shutil.copy("/app/tools/Aptamer-Processing/rename_dna.py", wd / "rename_dna.py")
 
-        if aptamer_type.upper() == "RNA":
-            # Keep A, U, G, C and 2'-OH intact; only standardize atom/residue formatting
-            clean_aptamer_pdb(
-                input_pdb=str(wd / "Aptamer.pdb"),
-                output_pdb=str(fixed_pdb),
-                aptamer_type="RNA",
-            )
+        if convert_rna:
+            # Converts Aptamer.pdb -> aptamer_DNA.pdb
+            subprocess.run([sys.executable, "rna_to_dna_with_methyl.py"], cwd=str(wd), check=True, capture_output=True, text=True)
         else:
-            # DNA workflow
-            shutil.copy(
-                "/app/tools/Aptamer-Processing/rna_to_dna_with_methyl.py",
-                wd / "rna_to_dna_with_methyl.py",
-            )
-            if convert_rna:
-                # Converts Aptamer.pdb -> aptamer_DNA.pdb (adds C5 methyl to Uracil)
-                subprocess.run(
-                    [sys.executable, "rna_to_dna_with_methyl.py"],
-                    cwd=str(wd),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
+            # If already DNA, create aptamer_DNA.pdb for rename_dna.py
+            shutil.copy(wd / "Aptamer.pdb", wd / "aptamer_DNA.pdb")
 
-            # Standardize to DA, DT, DG, DC and strip any leftover O2'/HO2'
-            clean_aptamer_pdb(
-                input_pdb=str(wd / "aptamer_DNA.pdb"),
-                output_pdb=str(fixed_pdb),
-                aptamer_type="DNA",
-            )
+        # Converts aptamer_DNA.pdb -> aptamer_fixed.pdb
+        subprocess.run([sys.executable, "rename_dna.py"], cwd=str(wd), check=True, capture_output=True, text=True)
 
+        fixed_pdb = wd / "aptamer_fixed.pdb"
         if not fixed_pdb.exists():
             return {"status": "failed", "message": "Failed to generate aptamer_fixed.pdb"}
 
@@ -125,7 +56,6 @@ def run_aptamer_task(
         return {"status": "failed", "message": f"Aptamer Processing Error: {err}"}
     except Exception as e:
         return {"status": "failed", "message": str(e)}
-
 
 run_aptamer_processing_task = run_aptamer_task
 
