@@ -64,7 +64,7 @@ with st.sidebar:
     # Colab Worker Link
     st.header("🚀 Worker Environment")
     st.markdown("Launch the background worker before running tasks:")
-    st.link_button("🔗 Open Google Colab Worker", "https://colab.research.google.com/drive/1pb4-oy02iPr5ysDhtq5HF2NLFaQH4R_-", use_container_width=True)
+    st.link_button("🔗 Open Google Colab Worker", "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/Google_Colab_Worker.ipynb", use_container_width=True)
     st.markdown("---")
     
     # Backend URL Configuration
