@@ -32,7 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SHARED_DATA = Path("/app/shared_data")
+SHARED_DATA = Path("/content/drive/MyDrive/ColabMD_Data/shared_data")
 SHARED_DATA.mkdir(parents=True, exist_ok=True)
 
 router = APIRouter()
