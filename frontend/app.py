@@ -490,7 +490,7 @@ with tab5:
     
     colab_url_cgmd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/ColabMD_Edu_Protein_NA_Run_CGMD.ipynb"
     st.markdown(f'<a href="{colab_url_cgmd}" target="_blank"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height:38px;"/></a>', unsafe_allow_html=True)
-    st.caption("After completing CGMD, bring `dynamic_fitted.xtc`, `dynamic.tpr`, `dynamic.mdp`, `index.ndx`, `fixed.pdb`, and `aptamer_relaxed.pdb` into Tab 6.")
+    st.caption("After completing CGMD, download `dynamic_fitted.xtc`, `dynamic.tpr`, `dynamic.mdp`, `index.ndx`, and `dynamic.pdb` and upload into Tab 6.")
 
 # ------------------------------------------
 # TAB 6: BACKMAPPING (CG TO ALL-ATOM RESOLUTION)
