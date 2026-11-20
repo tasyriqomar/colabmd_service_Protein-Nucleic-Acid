@@ -224,13 +224,12 @@ with tab2:
     st.info("Heavy molecular dynamics simulations require dedicated GPU acceleration and should be executed on Google Colab.")
     
     st.markdown("""
-    ### Workflow Steps Executed in Colab:
-    1. **System Preparation:** `gmx pdb2gmx` (Amber99SB-ILDN force field + TIP3P water).
-    2. **Solvation & Neutralization:** Box generation (`cubic`, 1.0 nm margin) and ionic neutralization (`0.15 M NaCl`).
-    3. **Energy Minimization:** Steepest descent minimization (`em.mdp`).
-    4. **Equilibration:** NVT and NPT thermodynamic ensembles.
-    5. **Production MD:** Long-timescale dynamics run (`md.mdp`).
-    6. **Centering & Fitting:** Trajectory fitting (`gmx trjconv` with `-fit rot+trans`) to generate `aptamer_relaxed.pdb`.
+    ### Pipeline Operations:
+    1. **Setup:** Install GROMACS and configure custom DNA/RNA forcefield parameters.
+    2. **Preparation:** Generate topology, define the box, solvate, and add ions.
+    3. **Equilibration:** Run energy minimization, NVT, and NPT simulations.
+    4. **Production:** Execute the main All-Atomic Molecular Dynamics (AAMD) simulation.
+    5. **Processing:** Center, fit trajectories, and output final PDB files.
     """)
     
     colab_url_aamd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/ColabMD_Edu_Protein_NA_Run_AAMD.ipynb"
