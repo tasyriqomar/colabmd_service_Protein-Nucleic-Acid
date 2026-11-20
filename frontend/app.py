@@ -221,7 +221,7 @@ with tab1:
 # ------------------------------------------
 with tab2:
     st.header("Step 2: All-atom MD Simulations of DNA Aptamer")
-    st.info("Heavy molecular dynamics simulations require dedicated GPU acceleration and should be executed on Google Colab.")
+    st.info("Execute DNA/RNA AAMD simulations on Google Colab GPU runtimes.")
     
     st.markdown("""
     ### Pipeline Operations:
