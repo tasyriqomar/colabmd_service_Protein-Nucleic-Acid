@@ -483,9 +483,11 @@ with tab5:
     
     st.markdown("""
     ### Pipeline Operations:
-    1. **Complex Solvation:** Solvate `complex_CG.gro` with `insane.py` in a $10 \\times 10 \\times 10\\text{ nm}^3$ box with $0.15\\text{ M NaCl}$.
-    2. **Simulation:** Energy minimization, NPT equilibration, and production MD under the Martini force field.
-    3. **Centering:** Remove periodic boundary condition jumps (`gmx trjconv -pbc mol -center`).
+    1. **Setup:** Install GPU-enabled GROMACS and clone the CGMD workspace.
+    2. **Minimization:** Compile topology and run energy minimization.
+    3. **Indexing:** Group Protein with DNA/RNA, and Water with Ions.
+    4. **Simulation:** Execute equilibration, followed by the 100ns production MD.
+    5. **Processing:** Center, fit trajectories to the backbone, and export as a PDB file.
     """)
     
     colab_url_cgmd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/ColabMD_Edu_Protein_NA_Run_CGMD.ipynb"
