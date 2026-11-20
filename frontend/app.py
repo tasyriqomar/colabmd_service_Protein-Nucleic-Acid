@@ -386,7 +386,7 @@ with tab3:
 # ------------------------------------------
 with tab4:
     st.header("Step 4: Complex Coarse-Grained Preparation")
-    st.markdown("Parameterize the best docked complex into coarse-grained representation (`martinize.py` & `martinize-dna.py`), solvate & ionize with `insane.py`, and construct `system.top`.")
+    st.markdown("Parameterize the best docked complex into coarse-grained representation, solvate, ionize, and construct.")
     
     st.subheader("1. All-Atomic Complex Input")
     has_docking_pose = st.session_state.get("docking_zip_bytes") is not None
