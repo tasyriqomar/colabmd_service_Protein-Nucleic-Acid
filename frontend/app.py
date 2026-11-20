@@ -164,7 +164,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
 # ------------------------------------------
 with tab1:
     st.header("Step 1: Aptamer Processing")
-    st.markdown("Convert RNA structures to DNA (`rna_to_dna_with_methyl.py`) and rename residues for GROMACS parameterization.")
+    st.markdown("Process DNA/RNA structure and rename residues for GROMACS parameterization.")
     
     st.info("💡 **Don't have a 3D structure yet?**")
     st.markdown("""
