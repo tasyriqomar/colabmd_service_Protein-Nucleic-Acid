@@ -234,7 +234,7 @@ with tab2:
     
     colab_url_aamd = "https://colab.research.google.com/github/tasyriqomar/ColabMD-Edu_Protein-NA/blob/main/ColabMD_Edu_Protein_NA_Run_AAMD.ipynb"
     st.markdown(f'<a href="{colab_url_aamd}" target="_blank"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height:38px;"/></a>', unsafe_allow_html=True)
-    st.caption("Once production finishes, download `aptamer_relaxed.pdb` to proceed to docking or coarse-graining.")
+    st.caption("Once production finishes, download `aptamer_relaxed.pdb` and upload into Tab 3")
 
 # ------------------------------------------
 # TAB 3: DOCKING PROCESSING (HADDOCK3)
