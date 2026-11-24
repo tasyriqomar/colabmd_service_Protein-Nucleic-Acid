@@ -127,9 +127,10 @@ with st.sidebar:
 # 4. STATE PERSISTENCE
 # ==========================================
 state_keys = [
-    "job_id", "aptamer_bytes", "docking_zip_bytes", "docking_scores_df", 
+    "job_id", "aptamer_bytes", "docking_zip_bytes", "docking_scores_df",
+    "docking_interactions_df", "rank2_model_name",
     "cg_prep_zip_bytes", "cg_gro_preview", "dna_top_preview", "sys_top_preview",
-    "bm_task_id", "traj_zip_bytes", "plip_zip_bytes", "mmgbsa_zip_bytes", 
+    "bm_task_id", "traj_zip_bytes", "plip_zip_bytes", "mmgbsa_zip_bytes",
     "pca_fel_zip_bytes", "mmgbsa_summary"
 ]
 for k in state_keys:
@@ -237,43 +238,43 @@ with tab2:
     st.caption("Once production finishes, download `aptamer_relaxed.pdb` and upload into Tab 3")
 
 # ------------------------------------------
-# TAB 3: DOCKING PROCESSING (HADDOCK3)
+# TAB 3: DOCKING PROCESSING (HDOCK + EGNN AI SCORING)
 # ------------------------------------------
 with tab3:
-    st.header("Step 3: Rigid-Body Docking Processing (HADDOCK3)")
-    st.markdown("Perform macromolecular docking between the protein receptor and nucleic acid aptamer.")
-    
+    st.header("Step 3: Protein–Nucleic Acid Docking (HDOCK + EGNN AI Scoring)")
+    st.markdown("Perform ab-initio docking with **HDOCKlite** (Chain A: Protein, Chain B: Aptamer) and re-rank poses using the pretrained **EGNN** scorer.")
+
     st.info("💡 **Don't have a protein structure?**")
-    st.markdown("""
-    - Generate one using [AlphaFold2.ipynb](https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2.ipynb)
-    """)
+    st.markdown("- Generate one using [AlphaFold2.ipynb](https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2.ipynb)")
     st.info("💡 **Renumber residue numbers in PDB file?**")
-    st.markdown("""
-    - Revise PDB using [www.canoz.com](https://www.canoz.com/sdh/renumberpdbchain.pl)
-    """)
+    st.markdown("- Revise PDB using [www.canoz.com](https://www.canoz.com/sdh/renumberpdbchain.pl)")
     st.markdown("---")
-    
+
     c1, c2 = st.columns(2)
     with c1:
-        prot_dock_file = st.file_uploader("Upload Protein PDB (Chain A)", type=["pdb"], key="prot_dock_up")
-        sampling_models = st.number_input("Rigid-Body Sampling Poses", min_value=5, max_value=100, value=20, step=5)
+        prot_dock_file = st.file_uploader("Upload Protein PDB (Receptor → Chain A)", type=["pdb"], key="prot_dock_up")
+        nmax_models = st.number_input("Top HDOCK Models to Generate & Score (-nmax)", min_value=10, max_value=100, value=100, step=10)
     with c2:
-        dna_dock_file = st.file_uploader("Upload Aptamer PDB (Chain B)", type=["pdb"], key="dna_dock_up")
-        cm_restraints = st.checkbox("Center-of-Mass Restraints (ab-initio)", value=True)
-    
-    if st.button("Run HADDOCK3 Docking") and prot_dock_file and dna_dock_file:
+        dna_dock_file = st.file_uploader("Upload Aptamer PDB (Ligand → Chain B)", type=["pdb"], key="dna_dock_up")
+        interaction_cutoff = st.number_input("Interaction Cutoff (Å)", min_value=2.5, max_value=8.0, value=4.5, step=0.5)
+
+    if st.button("Run HDOCK Docking & AI Scoring") and prot_dock_file and dna_dock_file:
         st.session_state.docking_zip_bytes = None
         st.session_state.docking_scores_df = None
-        with st.spinner("Queueing HADDOCK3 topology and rigid-body minimization on Colab..."):
+        st.session_state.docking_interactions_df = None
+        st.session_state.rank2_model_name = ""
+
+        with st.spinner("Running HDOCKlite docking and EGNN AI scoring on Colab..."):
             files = {
                 "protein_pdb": (prot_dock_file.name, prot_dock_file.getvalue(), "chemical/x-pdb"),
-                "dna_pdb": (dna_dock_file.name, dna_dock_file.getvalue(), "chemical/x-pdb")
+                "dna_pdb": (dna_dock_file.name, dna_dock_file.getvalue(), "chemical/x-pdb"),
             }
-            data = {"sampling": sampling_models, "cmrest": cm_restraints}
+            data = {"nmax": int(nmax_models), "interaction_cutoff": float(interaction_cutoff)}
             try:
-                res = requests.post(f"{API_URL}/run-haddock-docking", files=files, data=data)
+                res = requests.post(f"{API_URL}/run-hdock-docking", files=files, data=data)
                 if res.status_code == 200:
                     task_id = res.json()["task_id"]
+                    st.session_state["tab3_task_id"] = task_id
                     status_ph = st.empty()
                     while True:
                         s_res = requests.get(f"{API_URL}/status/{task_id}").json()
@@ -286,89 +287,114 @@ with tab3:
                                     st.session_state.docking_zip_bytes = dl.content
                                     if "scores" in t_res:
                                         st.session_state.docking_scores_df = pd.DataFrame(t_res["scores"])
-                                    status_ph.success("✅ Docking and contact profiling complete!")
+                                    if "rank2_interactions" in t_res:
+                                        st.session_state.docking_interactions_df = pd.DataFrame(t_res["rank2_interactions"])
+                                    st.session_state.rank2_model_name = t_res.get("rank2_model", "Rank 2")
+                                    status_ph.success("✅ HDOCK docking, EGNN scoring, and Rank 2 interaction profiling complete!")
                                     time.sleep(1)
                                     st.rerun()
+                            else:
+                                err_msg = t_res.get("message", "Unknown error") if isinstance(t_res, dict) else str(t_res)
+                                status_ph.error(f"❌ HDOCK Error: {err_msg}")
                             break
                         elif st_val == "FAILED":
-                            status_ph.error("❌ Docking failed on Colab.")
+                            status_ph.error("❌ HDOCK Celery task failed on Colab.")
                             break
                         time.sleep(3)
+                else:
+                    st.error(f"API Error {res.status_code}: {res.text}")
             except Exception as e:
                 st.error(f"Connection error: {e}")
 
     if st.session_state.get("docking_scores_df") is not None:
-        st.subheader("📊 Ranked Docked Poses by HADDOCK Score")
+        st.subheader("🏆 Final EGNN AI Rankings (HDOCK Models)")
         st.dataframe(st.session_state.docking_scores_df, use_container_width=True)
 
     if st.session_state.get("docking_zip_bytes"):
         st.download_button(
-            label="⬇️ Download Docking Results (.zip)",
+            label="⬇️ Download All HDOCK Results (.zip)",
             data=st.session_state.docking_zip_bytes,
-            file_name="haddock3_docking_results.zip",
+            file_name="hdock_docking_results.zip",
             mime="application/zip",
-            key="dl_dock_btn"
+            key="dl_dock_btn",
         )
-        
+        st.info("🔗 **`docked_complex_best.pdb` (Chain A: Protein, Chain B: Aptamer) is automatically loaded into Tab 4.**")
+
+        # --- Visualize Rank 2 Complex & Interactions (py3Dmol) ---
         st.markdown("---")
-        st.subheader("Interactive 3D Viewer (Labeled Interface)")
+        rank2_label = st.session_state.get("rank2_model_name", "Rank 2")
+        st.subheader(f"🧬 Visualize Rank 2 Complex & Interactions ({rank2_label})")
         try:
+            from Bio.PDB import NeighborSearch
+
             with zipfile.ZipFile(io.BytesIO(st.session_state.docking_zip_bytes)) as z:
-                pdb_string = z.read("docked_complex_best.pdb").decode("utf-8")
-                
+                target_pdb = "docked_complex_rank2.pdb" if "docked_complex_rank2.pdb" in z.namelist() else "docked_complex_best.pdb"
+                pdb_string = z.read(target_pdb).decode("utf-8")
+
             parser = PDBParser(QUIET=True)
-            structure = parser.get_structure('docked_complex', io.StringIO(pdb_string))
+            structure = parser.get_structure("rank2", io.StringIO(pdb_string))
             model = structure[0]
-            chain_a, chain_b = model['A'], model['B']
-            
-            contact_cutoff = 4.0
-            prot_res_list, dna_res_list, labeled_atoms = set(), set(), []
-            
-            for atom_a in chain_a.get_atoms():
-                if atom_a.element == 'H': continue
-                for atom_b in chain_b.get_atoms():
-                    if atom_b.element == 'H': continue
-                    if (atom_a - atom_b) <= contact_cutoff:
-                        res_a, res_b = atom_a.get_parent(), atom_b.get_parent()
-                        prot_res_list.add(res_a.get_id()[1])
-                        dna_res_list.add(res_b.get_id()[1])
-                        labeled_atoms.append((atom_a, res_a, 'A'))
-                        labeled_atoms.append((atom_b, res_b, 'B'))
-                        
-            view = py3Dmol.view(width=800, height=550)
+
+            prot_atoms = [a for a in model["A"].get_atoms() if a.element != "H"] if "A" in model else []
+            na_atoms = [a for a in model["B"].get_atoms() if a.element != "H"] if "B" in model else []
+
+            interacting_prot, interacting_na = {}, {}
+            if prot_atoms and na_atoms:
+                ns_prot = NeighborSearch(prot_atoms)
+                for atom in na_atoms:
+                    close_prot = ns_prot.search(atom.get_coord(), float(interaction_cutoff), level="R")
+                    if close_prot:
+                        na_res = atom.get_parent()
+                        na_key = ("B", na_res.id[1])
+                        if na_key not in interacting_na:
+                            anchor = na_res["P"].get_coord() if "P" in na_res else atom.get_coord()
+                            interacting_na[na_key] = (na_res.resname.strip(), anchor)
+                        for p_res in close_prot:
+                            p_key = ("A", p_res.id[1])
+                            if p_key not in interacting_prot:
+                                anchor = p_res["CA"].get_coord() if "CA" in p_res else next(p_res.get_atoms()).get_coord()
+                                interacting_prot[p_key] = (p_res.resname.strip(), anchor)
+
+            st.caption(f"Found **{len(interacting_prot)}** protein (Chain A) & **{len(interacting_na)}** nucleic acid (Chain B) interacting residues within {interaction_cutoff} Å.")
+
+            view = py3Dmol.view(width=900, height=580)
             view.addModel(pdb_string, "pdb")
-            view.setStyle({'chain': 'A'}, {'cartoon': {'color': 'royalblue', 'opacity': 0.3}})
-            view.setStyle({'chain': 'B'}, {'cartoon': {'color': 'darkorange', 'opacity': 0.3}})
-            view.addStyle({'chain': 'A', 'resi': list(prot_res_list)}, {'stick': {'color': 'cyan', 'radius': 0.2}, 'cartoon': {'color': 'royalblue', 'opacity': 1.0}})
-            view.addStyle({'chain': 'B', 'resi': list(dna_res_list)}, {'stick': {'color': 'yellow', 'radius': 0.2}, 'cartoon': {'color': 'darkorange', 'opacity': 1.0}})
-            
-            seen = set()
-            for atom, res, ch in labeled_atoms:
-                k = (ch, res.get_id()[1], atom.get_name())
-                if k in seen: continue
-                seen.add(k)
-                pos = atom.get_coord()
+            view.setBackgroundColor("white")
+            view.setStyle({"chain": "A"}, {"cartoon": {"color": "royalblue", "opacity": 0.85}})
+            view.setStyle({"chain": "B"}, {"cartoon": {"color": "darkorange", "opacity": 0.85}})
+
+            for (ch, resi), (resname, coord) in interacting_prot.items():
+                view.addStyle({"chain": ch, "resi": resi}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.2}})
                 view.addLabel(
-                    f"{res.get_resname().strip()}{res.get_id()[1]}:{atom.get_name().strip()}",
-                    {'position': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
-                     'backgroundColor': '#1e3d59' if ch == 'A' else '#d96459',
-                     'fontColor': 'white', 'fontSize': 11, 'borderThickness': 0.5, 'backgroundOpacity': 0.8}
+                    f"{resname}{resi}:{ch}",
+                    {"position": {"x": float(coord[0]), "y": float(coord[1]), "z": float(coord[2])},
+                     "backgroundColor": "#005f73", "fontColor": "white", "fontSize": 11,
+                     "backgroundOpacity": 0.85, "borderThickness": 0}
                 )
-            view.zoomTo({'chain': 'A', 'resi': list(prot_res_list)})
-            
+
+            for (ch, resi), (resname, coord) in interacting_na.items():
+                view.addStyle({"chain": ch, "resi": resi}, {"stick": {"colorscheme": "orangeCarbon", "radius": 0.2}})
+                view.addLabel(
+                    f"{resname}{resi}:{ch}",
+                    {"position": {"x": float(coord[0]), "y": float(coord[1]), "z": float(coord[2])},
+                     "backgroundColor": "#ae2012", "fontColor": "white", "fontSize": 11,
+                     "backgroundOpacity": 0.85, "borderThickness": 0}
+                )
+
+            view.zoomTo()
             v_html = view._make_html()
             btn_html = """
-            <div style="text-align: center; margin-top: 5px;">
-                <button id="download_btn" style="background-color: #2e7d32; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
+            <div style="text-align: center; margin-top: 6px;">
+                <button id="download_rank2_btn" style="background-color: #1a73e8; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
                     📸 Download High-Res PNG
                 </button>
             </div>
             <script>
-            document.getElementById('download_btn').onclick = function() {
+            document.getElementById('download_rank2_btn').onclick = function() {
                 var c = document.getElementsByTagName('canvas');
                 if (c.length > 0) {
                     var link = document.createElement('a');
-                    link.download = 'docked_interface_publication.png';
+                    link.download = 'rank2_complex_interactions.png';
                     link.href = c[c.length - 1].toDataURL("image/png").replace("image/png", "image/octet-stream");
                     document.body.appendChild(link);
                     link.click();
@@ -377,9 +403,26 @@ with tab3:
             };
             </script>
             """
-            components.html(v_html + btn_html, height=620)
+            components.html(v_html + btn_html, height=640)
         except Exception as e:
-            st.warning(f"Could not render 3D viewer: {e}")
+            st.warning(f"Could not render Rank 2 3D viewer: {e}")
+
+        # --- Protein–Nucleic Acid Interaction Table (CSV) ---
+        st.markdown("---")
+        st.subheader("📊 Protein–Nucleic Acid Interaction Table (Rank 2)")
+        df_int = st.session_state.get("docking_interactions_df")
+        if df_int is not None and not df_int.empty:
+            st.dataframe(df_int, use_container_width=True)
+            csv_bytes = df_int.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Download Interaction Table (CSV)",
+                data=csv_bytes,
+                file_name="rank2_interactions.csv",
+                mime="text/csv",
+                key="dl_rank2_csv_btn",
+            )
+        else:
+            st.info(f"No protein–nucleic acid interactions found within {interaction_cutoff} Å.")
 
 # ------------------------------------------
 # TAB 4: COMPLEX COARSE-GRAINED PREPARATION
