@@ -12,6 +12,7 @@ import os
 from tasks.worker import (
     celery_app,
     run_aptamer_task,
+    run_hdock_docking_task,
     run_haddock_docking_task,
     run_complex_cg_prep_task,
     run_backmapping_workflow,
@@ -101,6 +102,23 @@ async def api_aptamer(aptamer_pdb: UploadFile = File(...), convert_rna: bool = F
 
     task = run_aptamer_task.delay(str(work_dir), content, convert_rna)
     return {"task_id": task.id, "job_id": job_id}
+
+@app.post("/api/v1/run-hdock-docking")
+async def run_hdock_docking(
+    protein_pdb: UploadFile = File(...),
+    dna_pdb: UploadFile = File(...),
+    nmax: int = Form(100),
+    interaction_cutoff: float = Form(4.5),
+):
+    job_id = f"hdock_{int(time.time())}"
+    work_dir = f"/app/shared_data/{job_id}"
+    os.makedirs(work_dir, exist_ok=True)
+
+    prot_bytes = await protein_pdb.read()
+    dna_bytes = await dna_pdb.read()
+
+    task = run_hdock_docking_task.delay(work_dir, prot_bytes, dna_bytes, nmax, interaction_cutoff)
+    return {"message": "HDOCK docking queued.", "task_id": task.id}
 
 @app.post("/api/v1/run-haddock-docking")
 async def api_docking(protein_pdb: UploadFile = File(...), dna_pdb: UploadFile = File(...), sampling: int = Form(20), cmrest: bool = Form(True)):
