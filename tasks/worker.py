@@ -627,6 +627,33 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
         if (cg_tools_dir / "insane.py").exists():
             shutil.copy(cg_tools_dir / "insane.py", wd / "insane.py")
 
+        # Calculate exact net charge from Protein_A.itp and Nucleic_A.itp
+        def get_itp_net_charge(itp_path: Path) -> float:
+            charge = 0.0
+            in_atoms = False
+            if not itp_path.exists():
+                return 0.0
+            with open(itp_path, "r") as f:
+                for line in f:
+                    clean = line.split(";")[0].strip()
+                    if not clean:
+                        continue
+                    if clean.startswith("["):
+                        in_atoms = (clean.lower() == "[ atoms ]")
+                        continue
+                    if in_atoms:
+                        parts = clean.split()
+                        if len(parts) >= 7:
+                            try:
+                                charge += float(parts[6])
+                            except ValueError:
+                                pass
+            return charge
+
+        total_solute_charge = int(round(
+            get_itp_net_charge(wd / "Protein_A.itp") + get_itp_net_charge(wd / "Nucleic_A.itp")
+        ))
+
         insane_cmd = [
             "python2", "insane.py",
             "-f", "complex_CG.gro",
@@ -634,7 +661,7 @@ def run_complex_cg_prep_task(work_dir: str, complex_pdb_content: bytes, dnatype:
             "-pbc", "cubic",
             "-box", "10,10,10",
             "-salt", "0.15",
-            "-charge", "auto",
+            "-charge", str(total_solute_charge),
             "-sol", "W"
         ]
         insane_proc = subprocess.run(insane_cmd, cwd=str(wd), check=True, capture_output=True, text=True)
