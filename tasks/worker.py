@@ -372,27 +372,26 @@ def run_hdock_docking_task(
 
         df_scores.to_csv(wd / "hdock_ai_rankings.csv", index=False)
 
-        # 5. Enforce Chain A / Chain B on Rank 1 (docked_complex_best.pdb for Tab 4) and Rank 2
+        # 5. Enforce Chain A / Chain B on Rank 1 (docked_complex_best.pdb for Tab 4)
         rank1_model = df_scores.iloc[0]["Model"]
-        rank2_model = df_scores.iloc[1]["Model"] if len(df_scores) >= 2 else rank1_model
 
         best_pose_pdb = wd / "docked_complex_best.pdb"
-        rank2_pose_pdb = wd / "docked_complex_rank2.pdb"
-        enforce_complex_chains(wd / rank2_model, best_pose_pdb)
-        enforce_complex_chains(wd / rank2_model, rank2_pose_pdb)
+        rank1_pose_pdb = wd / "docked_complex_rank1.pdb"
+        enforce_complex_chains(wd / rank1_model, best_pose_pdb)
+        enforce_complex_chains(wd / rank1_model, rank1_pose_pdb)
 
-        # 6. Generate Protein–Nucleic Acid Interaction Table (CSV) for Rank 2
-        df_interactions = compute_na_interactions_df(rank2_pose_pdb, cutoff=float(interaction_cutoff))
-        df_interactions.to_csv(wd / "rank2_interactions.csv", index=False)
+        # 6. Generate Protein–Nucleic Acid Interaction Table (CSV) for Rank 1
+        df_interactions = compute_na_interactions_df(best_pose_pdb, cutoff=float(interaction_cutoff))
+        df_interactions.to_csv(wd / "rank1_interactions.csv", index=False)
 
         # 7. Package results into ZIP (keeping docked_complex_best.pdb at root for Tab 4)
         zip_path = wd / "hdock_docking_results.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
             for fname in [
                 "docked_complex_best.pdb",
-                "docked_complex_rank2.pdb",
+                "docked_complex_rank1.pdb",
                 "hdock_ai_rankings.csv",
-                "rank2_interactions.csv",
+                "rank1_interactions.csv",
                 "Hdock.out",
             ]:
                 if (wd / fname).exists():
@@ -402,8 +401,8 @@ def run_hdock_docking_task(
             "status": "success",
             "result_file": str(zip_path),
             "scores": df_scores.to_dict(orient="records"),
-            "rank2_model": rank2_model,
-            "rank2_interactions": df_interactions.to_dict(orient="records"),
+            "rank1_model": rank1_model,
+            "rank1_interactions": df_interactions.to_dict(orient="records"),
         }
     except subprocess.CalledProcessError as e:
         err = e.stderr if e.stderr else e.stdout
