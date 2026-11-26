@@ -128,7 +128,7 @@ with st.sidebar:
 # ==========================================
 state_keys = [
     "job_id", "aptamer_bytes", "docking_zip_bytes", "docking_scores_df",
-    "docking_interactions_df", "rank2_model_name",
+    "docking_interactions_df", "rank1_model_name",
     "cg_prep_zip_bytes", "cg_gro_preview", "dna_top_preview", "sys_top_preview",
     "bm_task_id", "traj_zip_bytes", "plip_zip_bytes", "mmgbsa_zip_bytes",
     "pca_fel_zip_bytes", "mmgbsa_summary"
@@ -262,7 +262,7 @@ with tab3:
         st.session_state.docking_zip_bytes = None
         st.session_state.docking_scores_df = None
         st.session_state.docking_interactions_df = None
-        st.session_state.rank2_model_name = ""
+        st.session_state.rank1_model_name = ""
 
         with st.spinner("Running HDOCKlite docking and EGNN AI scoring on Colab..."):
             files = {
@@ -287,10 +287,10 @@ with tab3:
                                     st.session_state.docking_zip_bytes = dl.content
                                     if "scores" in t_res:
                                         st.session_state.docking_scores_df = pd.DataFrame(t_res["scores"])
-                                    if "rank2_interactions" in t_res:
-                                        st.session_state.docking_interactions_df = pd.DataFrame(t_res["rank2_interactions"])
-                                    st.session_state.rank2_model_name = t_res.get("rank2_model", "Rank 2")
-                                    status_ph.success("✅ HDOCK docking, EGNN scoring, and Rank 2 interaction profiling complete!")
+                                    if "rank1_interactions" in t_res:
+                                        st.session_state.docking_interactions_df = pd.DataFrame(t_res["rank1_interactions"])
+                                    st.session_state.rank1_model_name = t_res.get("rank1_model", "Rank 1")
+                                    status_ph.success("✅ HDOCK docking, EGNN scoring, and Rank 1 interaction profiling complete!")
                                     time.sleep(1)
                                     st.rerun()
                             else:
@@ -320,19 +320,19 @@ with tab3:
         )
         st.info("🔗 **`docked_complex_best.pdb` (Chain A: Protein, Chain B: Aptamer) is automatically loaded into Tab 4.**")
 
-        # --- Visualize Rank 2 Complex & Interactions (py3Dmol) ---
+        # --- Visualize Rank 1 Complex & Interactions (py3Dmol) ---
         st.markdown("---")
-        rank2_label = st.session_state.get("rank2_model_name", "Rank 2")
-        st.subheader(f"🧬 Visualize Rank 2 Complex & Interactions ({rank2_label})")
+        rank1_label = st.session_state.get("rank1_model_name", "Rank 1")
+        st.subheader(f"🧬 Visualize Rank 1 Complex & Interactions ({rank1_label})")
         try:
             from Bio.PDB import NeighborSearch
 
             with zipfile.ZipFile(io.BytesIO(st.session_state.docking_zip_bytes)) as z:
-                target_pdb = "docked_complex_rank2.pdb" if "docked_complex_rank2.pdb" in z.namelist() else "docked_complex_best.pdb"
+                target_pdb = "docked_complex_rank1.pdb" if "docked_complex_rank1.pdb" in z.namelist() else "docked_complex_best.pdb"
                 pdb_string = z.read(target_pdb).decode("utf-8")
 
             parser = PDBParser(QUIET=True)
-            structure = parser.get_structure("rank2", io.StringIO(pdb_string))
+            structure = parser.get_structure("rank1", io.StringIO(pdb_string))
             model = structure[0]
 
             prot_atoms = [a for a in model["A"].get_atoms() if a.element != "H"] if "A" in model else []
@@ -385,16 +385,16 @@ with tab3:
             v_html = view._make_html()
             btn_html = """
             <div style="text-align: center; margin-top: 6px;">
-                <button id="download_rank2_btn" style="background-color: #1a73e8; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
+                <button id="download_rank1_btn" style="background-color: #1a73e8; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
                     📸 Download High-Res PNG
                 </button>
             </div>
             <script>
-            document.getElementById('download_rank2_btn').onclick = function() {
+            document.getElementById('download_rank1_btn').onclick = function() {
                 var c = document.getElementsByTagName('canvas');
                 if (c.length > 0) {
                     var link = document.createElement('a');
-                    link.download = 'rank2_complex_interactions.png';
+                    link.download = 'rank1_complex_interactions.png';
                     link.href = c[c.length - 1].toDataURL("image/png").replace("image/png", "image/octet-stream");
                     document.body.appendChild(link);
                     link.click();
@@ -405,11 +405,11 @@ with tab3:
             """
             components.html(v_html + btn_html, height=640)
         except Exception as e:
-            st.warning(f"Could not render Rank 2 3D viewer: {e}")
+            st.warning(f"Could not render Rank 1 3D viewer: {e}")
 
         # --- Protein–Nucleic Acid Interaction Table (CSV) ---
         st.markdown("---")
-        st.subheader("📊 Protein–Nucleic Acid Interaction Table (Rank 2)")
+        st.subheader("📊 Protein–Nucleic Acid Interaction Table (Rank 1)")
         df_int = st.session_state.get("docking_interactions_df")
         if df_int is not None and not df_int.empty:
             st.dataframe(df_int, use_container_width=True)
@@ -417,9 +417,9 @@ with tab3:
             st.download_button(
                 label="⬇️ Download Interaction Table (CSV)",
                 data=csv_bytes,
-                file_name="rank2_interactions.csv",
+                file_name="rank1_interactions.csv",
                 mime="text/csv",
-                key="dl_rank2_csv_btn",
+                key="dl_rank1_csv_btn",
             )
         else:
             st.info(f"No protein–nucleic acid interactions found within {interaction_cutoff} Å.")
